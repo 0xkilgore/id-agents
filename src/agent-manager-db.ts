@@ -155,6 +155,8 @@ import {
 } from './checkins/checkin-api-helpers.js';
 import { closeLinkedCheckinsForTerminalTask } from './checkins/checkin-autoclose.js';
 import type { CheckinRow } from './db/types.js';
+import { upsertDailyDeskRegistration } from './daily-desk/storage.js';
+import { reviewNextRegistration } from './review-next/registration.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import { resolveNewsTrigger } from './core/messaging-service.js';
 import type { HarnessType } from './harness/types.js';
@@ -5485,6 +5487,9 @@ export class AgentManagerDb {
                   project_ref: projectRef,
                   dispatch_ref: doc.dispatch_phid,
                   source_host: sourceHost,
+                  review_next: reviewNextRegistration(
+                    resultProjection?.review_next ?? (body as Record<string, unknown>).review_next,
+                  ),
                 },
                 new Date().toISOString(),
               );
@@ -10188,6 +10193,25 @@ export class AgentManagerDb {
             return res.status(409).json({ error: 'cross_team_linked_task' });
           }
           throw err;
+        }
+
+        const principal = (req as any).ctx?.principal || 'anon';
+        if (principal === 'admin' && ownerAgentId && ownerName && linkedTaskId) {
+          await upsertDailyDeskRegistration(this.db.adapter, {
+            team_id: teamId,
+            lane: 'follow_through',
+            entity_kind: 'checkin',
+            entity_id: row.id,
+            audience: 'operator',
+            environment: 'production',
+            owner: ownerName,
+            canonical_url: `/ops/tasks?task=${encodeURIComponent(linkedTaskRow?.name ?? linkedTaskId)}&checkin=${encodeURIComponent(row.id)}`,
+            effective_lifecycle: 'active',
+            source_as_of: new Date(row.updated_at).toISOString(),
+            admission_code: 'operator_owned_active_checkin',
+            admission_detail: 'operator-created owned checkin is actively following an open task',
+            permitted_actions: ['open', 'complete', 'snooze'],
+          }, new Date(row.updated_at).toISOString());
         }
 
         const linkedTask = linkedTaskRow

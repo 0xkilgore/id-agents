@@ -29,7 +29,7 @@ import type {
 } from "./types.js";
 import { artifactListVisualState } from "./local-health.js";
 import { guardArtifactCreate } from "../conformance/write-guard.js";
-import { migrateReviewNextTables } from "../review-next/storage.js";
+import { migrateReviewNextTables, upsertReviewNextMetadata } from "../review-next/storage.js";
 import { migrateDailyDeskTables } from "../daily-desk/storage.js";
 
 // Derive a stable artifact_id from an absolute path. Same path → same id,
@@ -447,6 +447,9 @@ export async function registerArtifact(
     if (shouldPersistSnapshot(bodySnapshot)) {
       await upsertArtifactBodyCache(adapter, snapshotCacheInput(artifactId, bodySnapshot), nowIso);
     }
+    if (req.review_next) {
+      await upsertReviewNextMetadata(adapter, row.artifact_id, req.review_next, nowIso);
+    }
     return { row, inserted: true };
   }
 
@@ -504,6 +507,9 @@ export async function registerArtifact(
   );
   if (shouldPersistSnapshot(bodySnapshot)) {
     await upsertArtifactBodyCache(adapter, snapshotCacheInput(artifactId, bodySnapshot), nowIso);
+  }
+  if (req.review_next) {
+    await upsertReviewNextMetadata(adapter, merged.artifact_id, req.review_next, nowIso);
   }
   return { row: merged, inserted: false };
 }
@@ -685,6 +691,7 @@ export async function registerArtifactPathDelivery(
     reconciled_at?: string | null;
     evidence_source_ref?: string | null;
     evidence_metadata?: Record<string, unknown>;
+    review_next?: import("../review-next/types.js").ReviewNextRegistration;
   },
   nowIso: string,
 ): Promise<{
@@ -719,6 +726,7 @@ export async function registerArtifactPathDelivery(
       source_host: input.source_host ?? hostname(),
       source_badges: input.source_badges ?? [source],
       reconciled_at: input.reconciled_at ?? undefined,
+      review_next: input.review_next,
     },
     nowIso,
   );
