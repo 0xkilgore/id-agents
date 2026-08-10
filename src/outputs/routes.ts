@@ -530,10 +530,13 @@ export function mountOutputsRoutes(
 
   // ── ARTIFACTS substrate proof-cut: delivery-log seam + parity cache ──
   const env = opts.env ?? process.env;
+  const feedbackActions: ReviewNextAction[] = isC0FeedbackReactionsEnabled(env)
+    ? ['comment', 'react']
+    : [];
   const reviewNextSupportedActions = new Set<ReviewNextAction>([
-    'open', 'acknowledge', 'comment', 'approve', 'request_change',
+    'open', 'acknowledge', 'approve', 'request_change',
+    ...feedbackActions,
     ...(opts.enqueueDispatch ? ['route' as const] : []),
-    ...(isC0FeedbackReactionsEnabled(env) ? ['react' as const] : []),
   ]);
   mountReviewNextRoutes(app, adapter, { now: clock, supportedActions: reviewNextSupportedActions });
   if (tasks && resolveTeamId) {
@@ -724,16 +727,21 @@ export function mountOutputsRoutes(
     };
   }
 
-  // Monday §1/§2 guards. RD-001: mutation targets must normalize to a stable
-  // artifact_id. A stable artifact_id passes through; an ENCODED ARTIFACT PATH is
-  // resolved to its stable artifact_id (so the review loop — comment → approve →
-  // ship — accepts the same ref the /detail + /comments GETs already resolve).
-  // Display ids / basenames / queue indices are still rejected (RD-027: every
-  // mutation route resolves the SAME way — no half-migrated dead-end). Returns a
-  // typed 4xx + null to signal the caller to stop.
-  function resolveMutationArtifactId(req: Request<{ id: string }>, res: Response): string | null {
+  // Monday §1/§2 guards. RD-001: mutation targets must normalize to a cataloged
+  // artifact_id. Conventional stable ids pass through; an exact catalog id is
+  // accepted even when it predates the stable-id prefix convention; and an
+  // ENCODED ARTIFACT PATH resolves to its stable artifact_id. Display ids,
+  // basenames, and queue indices remain rejected because they are neither exact
+  // catalog ids nor encoded paths. RD-027 keeps every mutation route on this
+  // single resolver. Returns a typed 4xx + null to signal the caller to stop.
+  async function resolveMutationArtifactId(
+    req: Request<{ id: string }>,
+    res: Response,
+  ): Promise<string | null> {
     const id = req.params.id;
     if (isValidArtifactId(id)) return id;
+    const catalog = await getArtifact(adapter, id);
+    if (catalog) return catalog.artifact_id;
     const ref = resolveArtifactDetailRef(id);
     if (ref.resolvedFrom !== 'artifact_id' && isValidArtifactId(ref.artifactId)) {
       return ref.artifactId;
@@ -1476,7 +1484,7 @@ export function mountOutputsRoutes(
   // adds typed suggested-change comments and follow-up dispatch receipts.
   app.post('/artifacts/:id/timeline', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = resolveMutationArtifactId(req, res);
+      const artifactId = await resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -1575,7 +1583,7 @@ export function mountOutputsRoutes(
       if (!isC0FeedbackReactionsEnabled(env)) {
         return res.status(404).json({ ok: false, error: 'c0_feedback_reactions_disabled' });
       }
-      const artifactId = resolveMutationArtifactId(req, res);
+      const artifactId = await resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -1822,7 +1830,7 @@ export function mountOutputsRoutes(
 
   app.post('/artifacts/:id/suggestions', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = resolveMutationArtifactId(req, res);
+      const artifactId = await resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -1879,7 +1887,7 @@ export function mountOutputsRoutes(
         if (!isEditInProductEnabled(env)) {
           return res.status(404).json({ ok: false, code: 'edit_in_product_disabled', error: 'edit_in_product_disabled' });
         }
-        const artifactId = resolveMutationArtifactId(req, res);
+        const artifactId = await resolveMutationArtifactId(req, res);
         if (!artifactId) return;
         const actor = requireActor(req, res);
         if (!actor) return;
@@ -1923,7 +1931,7 @@ export function mountOutputsRoutes(
     '/artifacts/:id/suggestions/:suggestion_id/reject',
     async (req: Request<{ id: string; suggestion_id: string }>, res: Response) => {
       try {
-        const artifactId = resolveMutationArtifactId(req, res);
+        const artifactId = await resolveMutationArtifactId(req, res);
         if (!artifactId) return;
         const actor = requireActor(req, res);
         if (!actor) return;
@@ -1948,7 +1956,7 @@ export function mountOutputsRoutes(
     '/artifacts/:id/suggestions/:suggestion_id/supersede',
     async (req: Request<{ id: string; suggestion_id: string }>, res: Response) => {
       try {
-        const artifactId = resolveMutationArtifactId(req, res);
+        const artifactId = await resolveMutationArtifactId(req, res);
         if (!artifactId) return;
         const actor = requireActor(req, res);
         if (!actor) return;
@@ -1989,7 +1997,7 @@ export function mountOutputsRoutes(
           capability: artifactFeedbackCapability(),
         });
       }
-      const artifactId = resolveMutationArtifactId(req, res);
+      const artifactId = await resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -2114,7 +2122,7 @@ export function mountOutputsRoutes(
 
   app.post('/artifacts/:id/approve', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = resolveMutationArtifactId(req, res);
+      const artifactId = await resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -2273,7 +2281,7 @@ export function mountOutputsRoutes(
   // (first-reject-wins), Monday-actor-attributed, cooldown-guarded.
   app.post('/artifacts/:id/reject', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = resolveMutationArtifactId(req, res);
+      const artifactId = await resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -2304,7 +2312,7 @@ export function mountOutputsRoutes(
 
   app.post('/artifacts/:id/ship', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = resolveMutationArtifactId(req, res);
+      const artifactId = await resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;

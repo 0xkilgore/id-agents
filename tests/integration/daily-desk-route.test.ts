@@ -95,6 +95,7 @@ describe("GET /daily-desk", () => {
     const manager = new AgentManagerDb(workDir, db as any);
     const base = `http://127.0.0.1:${port}`;
     const team = "daily-desk-admission";
+    const manualArtifactId = "daily-driver-stability-execution-2026-08-07";
     const headers = { "content-type": "application/json", "x-id-team": team, "x-id-admin": "1" };
     try {
       await manager.start(port);
@@ -161,7 +162,7 @@ describe("GET /daily-desk", () => {
           review_next: review(agentDoneId),
         },
       });
-      await artifact("art-manual", "manual", { review_next: review("art-manual", { attention_priority: 2 }) });
+      await artifact(manualArtifactId, "manual", { review_next: review(manualArtifactId, { attention_priority: 2 }) });
       await artifact("art-not-explicit", "agent-done");
       await artifact("art-test-fixture", "manual", {
         abs_path: "/repo/tests/fixtures/art-test-fixture.md",
@@ -213,7 +214,7 @@ describe("GET /daily-desk", () => {
       expect(desk.schema_version).toBe("daily-desk.v1");
       expect(laneMembership(desk)).toEqual({
         today: [operatorTask.id],
-        review_next: [agentDoneId, "art-manual"],
+        review_next: [agentDoneId, manualArtifactId],
         needs_response: ["inbox-operator"],
         follow_through: [admittedCheckin.checkin.id],
       });
@@ -225,17 +226,25 @@ describe("GET /daily-desk", () => {
       );
       const reviewNext = await fetch(`${base}/artifacts/review-next`, { headers }).then((response) => response.json()) as any;
       expect(desk.lanes[1].rows.map((row: any) => row.id)).toEqual(reviewNext.rows.map((row: any) => row.id));
+      expect(reviewNext.rows.find((row: any) => row.id === manualArtifactId)?.permitted_actions).toEqual([
+        "open",
+        "approve",
+      ]);
       const inboxItems = await fetch(`${base}/inbox/items`, { headers }).then((response) => response.json()) as any;
       expect(desk.lanes[2].rows.map((row: any) => row.id)).toEqual(
         inboxItems.items.filter((item: any) => item.classification_label === "action").map((item: any) => item.inbox_phid),
       );
+
+      await postJson(base, `/artifacts/${manualArtifactId}/approve`, headers, { actor_ref: "user:chris" });
+      const afterCustomIdApproval = await fetch(`${base}/daily-desk?today=${today}`, { headers }).then((response) => response.json()) as any;
+      expect(laneMembership(afterCustomIdApproval).review_next).toEqual([agentDoneId]);
 
       await postJson(base, `/artifacts/${agentDoneId}/approve`, headers, { actor_ref: "user:chris" });
       await postJson(base, `/checkins/${admittedCheckin.checkin.id}/close`, headers, { reason: "verified" });
       const after = await fetch(`${base}/daily-desk?today=${today}`, { headers }).then((response) => response.json()) as any;
       expect(laneMembership(after)).toEqual({
         today: [operatorTask.id],
-        review_next: ["art-manual"],
+        review_next: [],
         needs_response: ["inbox-operator"],
         follow_through: [],
       });
