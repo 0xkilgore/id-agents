@@ -1013,7 +1013,15 @@ function isDurableStateRoute(pathname: string): boolean {
     pathname === '/artifacts' ||
     pathname.startsWith('/artifacts/') ||
     pathname === '/outputs/inbox' ||
-    pathname.startsWith('/outputs/')
+    pathname.startsWith('/outputs/') ||
+    pathname === '/operator-attention' ||
+    pathname.startsWith('/operator-attention/') ||
+    pathname === '/daily-desk' ||
+    pathname.startsWith('/daily-desk/') ||
+    pathname === '/desk' ||
+    pathname.startsWith('/desk/') ||
+    pathname === '/ops' ||
+    pathname.startsWith('/ops/')
   );
 }
 

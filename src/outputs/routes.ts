@@ -141,6 +141,7 @@ import {
 } from './surfacing-health.js';
 import { mountReviewNextRoutes } from '../review-next/routes.js';
 import { mountDailyDeskRoutes } from '../daily-desk/routes.js';
+import { mountOperatorAttentionRoutes } from '../operator-attention/routes.js';
 import { retireReviewNextMetadata } from '../review-next/storage.js';
 import type { ReviewNextAction } from '../review-next/types.js';
 import { reviewNextRegistration } from '../review-next/registration.js';
@@ -546,6 +547,7 @@ export function mountOutputsRoutes(
       now: clock,
       supportedReviewNextActions: reviewNextSupportedActions,
     });
+    mountOperatorAttentionRoutes(app, adapter, { tasks, resolveTeamId, now: clock });
   }
   const deliveryLogPath =
     opts.deliveryLogPath ?? join(homedir(), 'Dropbox', 'Code', 'cane', 'taskview', 'delivery-log.md');

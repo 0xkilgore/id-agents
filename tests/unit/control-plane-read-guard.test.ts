@@ -41,6 +41,11 @@ describe("shouldGuard", () => {
     expect(shouldGuard("GET", "/agents", P)).toBe(true);
     expect(shouldGuard("GET", "/agents/roger/detail", P)).toBe(true);
     expect(shouldGuard("GET", "/outputs/inbox", P)).toBe(true);
+    expect(shouldGuard("GET", "/operator-attention", P)).toBe(true);
+    expect(shouldGuard("GET", "/operator-attention/suppressions", P)).toBe(true);
+    expect(shouldGuard("GET", "/daily-desk", P)).toBe(true);
+    expect(shouldGuard("GET", "/desk", P)).toBe(true);
+    expect(shouldGuard("GET", "/ops", P)).toBe(true);
   });
   it("never guards writes (the daemon burst must not be shed)", () => {
     expect(shouldGuard("POST", "/dispatches/x/accept", P)).toBe(false);

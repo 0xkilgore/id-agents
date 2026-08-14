@@ -38,7 +38,9 @@ export interface ReadGuard {
   inFlight(): number;
 }
 
-export const DEFAULT_PROTECTED_PREFIXES = ["/dispatches", "/agents", "/outputs/inbox"];
+export const DEFAULT_PROTECTED_PREFIXES = [
+  "/dispatches", "/agents", "/outputs/inbox", "/operator-attention", "/daily-desk", "/desk", "/ops",
+];
 export const DEFAULT_MAX_CONCURRENT = 3;
 export const DEFAULT_TIMEOUT_MS = 2500;
 

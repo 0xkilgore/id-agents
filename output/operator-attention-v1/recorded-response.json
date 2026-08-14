@@ -1,0 +1,127 @@
+{
+  "ok": true,
+  "schema_version": "operator-attention.v1",
+  "authority": {
+    "owner": "manager",
+    "projection": "operator_attention",
+    "state": "authoritative",
+    "source_cursor": "sha256:d4f55bebf3425119756af2972aab39ed77a849a74e28189d09a9b020479feee3"
+  },
+  "evaluated_at": "2026-08-13T15:00:00.000Z",
+  "source_as_of": "2026-08-13T14:00:00.000Z",
+  "freshness_state": "current",
+  "freshness_reason": "all admitted rows are current manager projections",
+  "bands": {
+    "primary": [
+      {
+        "ref": "feedback-terminal",
+        "title": "Synthetic feedback-terminal",
+        "owner": "synthetic-owner",
+        "authority": {
+          "owner": "manager",
+          "source_cursor": "sha256:18bbeddd26fb7ee436089db797bccec34e5d34b089b488e1b0026a4c332b8242"
+        },
+        "audience": "operator",
+        "environment": "production",
+        "band": "primary",
+        "rank_band": 1,
+        "canonical_url": "/ops/synthetic/feedback-terminal",
+        "lifecycle": "open",
+        "source_kind": "feedback",
+        "source_as_of": "2026-08-13T14:00:00.000Z",
+        "meaningful_at": "2026-08-13T12:00:00.000Z",
+        "due_at": null,
+        "expires_at": "2026-08-14T00:00:00.000Z",
+        "freshness_state": "current",
+        "permitted_actions": [
+          "open"
+        ],
+        "admission_reason": {
+          "code": "synthetic_explicit_request",
+          "detail": "synthetic fixture carries an explicit bounded request"
+        }
+      }
+    ],
+    "next": [
+      {
+        "ref": "linked-decision",
+        "title": "Synthetic linked-decision",
+        "owner": "synthetic-owner",
+        "authority": {
+          "owner": "manager",
+          "source_cursor": "sha256:0b708440682596fe4fcf797139a36923e3a89c42201ef53e254b04c680d28ed4"
+        },
+        "audience": "operator",
+        "environment": "production",
+        "band": "next",
+        "rank_band": 4,
+        "canonical_url": "/ops/synthetic/linked-decision",
+        "lifecycle": "open",
+        "source_kind": "report",
+        "source_as_of": "2026-08-13T14:00:00.000Z",
+        "meaningful_at": "2026-08-13T12:00:00.000Z",
+        "due_at": null,
+        "expires_at": "2026-08-14T00:00:00.000Z",
+        "freshness_state": "current",
+        "permitted_actions": [
+          "open"
+        ],
+        "admission_reason": {
+          "code": "synthetic_explicit_request",
+          "detail": "synthetic fixture carries an explicit bounded request"
+        }
+      }
+    ],
+    "waiting": [
+      {
+        "ref": "waiting-receipt",
+        "title": "Synthetic waiting-receipt",
+        "owner": "synthetic-owner",
+        "authority": {
+          "owner": "manager",
+          "source_cursor": "sha256:e8dff9831fbbfeb7ce88a0e2bb4c8a8b47a55ffb33c4fe625126b0060b13da12"
+        },
+        "audience": "operator",
+        "environment": "production",
+        "band": "waiting",
+        "rank_band": 7,
+        "canonical_url": "/ops/synthetic/waiting-receipt",
+        "lifecycle": "open",
+        "source_kind": "feedback",
+        "source_as_of": "2026-08-13T14:00:00.000Z",
+        "meaningful_at": "2026-08-13T12:00:00.000Z",
+        "due_at": null,
+        "expires_at": "2026-08-14T00:00:00.000Z",
+        "freshness_state": "current",
+        "permitted_actions": [
+          "open"
+        ],
+        "admission_reason": {
+          "code": "synthetic_explicit_request",
+          "detail": "synthetic fixture carries an explicit bounded request"
+        }
+      }
+    ]
+  },
+  "counts": {
+    "primary": 1,
+    "next": 1,
+    "waiting": 1,
+    "suppressed": 0,
+    "overflow": 0
+  },
+  "changes_count": 0,
+  "capabilities": {
+    "open": "available",
+    "complete": "available",
+    "snooze": "available",
+    "acknowledge": "available",
+    "comment": "available",
+    "approve": "available",
+    "request_change": "available",
+    "route": "available",
+    "react": "available"
+  },
+  "max_payload_bytes": 65536,
+  "payload_bytes": 2918
+}
