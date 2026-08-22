@@ -115,7 +115,9 @@ export class DispatchDocClient {
     const r = await this.wrapNullable("markFailed", () =>
       this.reactor.markFailed(phid, args),
     );
-    if (r.ok) this.onStatusChanged?.(phid, 'failed');
+    // A verified-promotion winner may be returned when a late failure is
+    // rejected. Emit only a status that actually committed.
+    if (r.ok && r.value.status === 'failed') this.onStatusChanged?.(phid, 'failed');
     return r;
   }
 

@@ -923,7 +923,11 @@ export class SchedulerHandle {
         failure_kind: failureKind,
         detail: failureDetail,
       });
-      return this.requireAgentDoneMutation(r, 'markFailed');
+      const failed = this.requireAgentDoneMutation(r, 'markFailed');
+      if (failed.status !== 'failed') {
+        throw this.agentDoneConflict(`failure closeout lost to terminal ${failed.status}`);
+      }
+      return failed;
     }
     // Dispatch-canonical strict-mode (CTO-4): even with success=true,
     // inspect the response body for known provider/runtime error
@@ -994,7 +998,11 @@ export class SchedulerHandle {
             failure_kind: decision.failure_kind,
             detail: decision.detail,
           });
-          return this.requireAgentDoneMutation(r, 'strictModeMarkFailed');
+          const failed = this.requireAgentDoneMutation(r, 'strictModeMarkFailed');
+          if (failed.status !== 'failed') {
+            throw this.agentDoneConflict(`failure closeout lost to terminal ${failed.status}`);
+          }
+          return failed;
         }
       }
     }

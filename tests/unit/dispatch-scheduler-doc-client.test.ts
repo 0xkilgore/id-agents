@@ -191,6 +191,33 @@ describe("DispatchDocClient lifecycle transitions", () => {
     expect(r.value.failure_detail).toBe("agent crashed");
   });
 
+  it("does not emit a false failed transition when markFailed returns a preserved done winner", async () => {
+    const now = "2026-05-19T20:00:00.000Z";
+    const reactor = new FakeReactor({ now: () => now });
+    const setupClient = new DispatchDocClient({ reactor, now: () => now });
+    const enq = await setupClient.enqueueDispatch(baseInput);
+    if (!enq.ok) throw new Error("enqueue");
+    const claimed = await setupClient.claimForStart({ limit: 1 });
+    if (!claimed.ok) throw new Error("claim");
+    const completed = await setupClient.markDone(claimed.value[0].dispatch_phid);
+    if (!completed.ok) throw new Error("done");
+
+    reactor.markFailed = async () => completed.value;
+    const statusChanges: string[] = [];
+    const client = new DispatchDocClient({
+      reactor,
+      now: () => now,
+      onStatusChanged: (_phid, status) => statusChanges.push(status),
+    });
+    const result = await client.markFailed(completed.value.dispatch_phid, {
+      failure_kind: "agent_error",
+      detail: "late watcher failure",
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { status: "done" } });
+    expect(statusChanges).toEqual([]);
+  });
+
   it("markBounced records a visible bounce + sets not_before_at", async () => {
     const { client } = freshClient();
     const enq = await client.enqueueDispatch(baseInput);

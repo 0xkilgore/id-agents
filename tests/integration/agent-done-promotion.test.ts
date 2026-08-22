@@ -697,6 +697,76 @@ describe("POST /agent-done — enforce mode", () => {
       linked_dispatch: enq.dispatch_phid,
     });
   });
+
+  it("returns 409 to a concurrent failure when a verified-promotion success wins", async () => {
+    const enq = await enqueue({ repo: "/abs/repo-race", branch: "feature/race" });
+    await claim(enq.dispatch_phid);
+    const reactor = (manager as any).dispatchScheduler.reactor;
+    const originalMarkFailed = reactor.markFailed.bind(reactor);
+    let markFailedEntered!: () => void;
+    let releaseMarkFailed!: () => void;
+    const entered = new Promise<void>((resolve) => { markFailedEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseMarkFailed = resolve; });
+    reactor.markFailed = async (...args: any[]) => {
+      markFailedEntered();
+      await release;
+      return originalMarkFailed(...args);
+    };
+
+    try {
+      const failureAttempt = fetch(`${baseUrl}/agent-done`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dispatch_id: enq.dispatch_phid,
+          success: false,
+          failure_kind: "agent_error",
+          error: "simultaneous failure",
+        }),
+      });
+      await entered;
+
+      const promotion = {
+        required: true,
+        completed: true,
+        repos: [{
+          path: "/abs/repo-race",
+          base: "main",
+          source_branch: "feature/race",
+          strategy: "fast_forward",
+          promoted_sha: "race123",
+          remote_main_sha: "race123",
+          pushed: true,
+          verified: true,
+        }],
+      };
+      const successWinner = await fetch(`${baseUrl}/agent-done`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dispatch_id: enq.dispatch_phid,
+          success: true,
+          promotion,
+          result: { reply: "accepted" },
+        }),
+      });
+      releaseMarkFailed();
+      const failureLoser = await failureAttempt;
+
+      expect(successWinner.status).toBe(200);
+      expect(failureLoser.status).toBe(409);
+      const stored = await reactor.getByPhid(enq.dispatch_phid);
+      expect(stored).toMatchObject({
+        status: "done",
+        failure_kind: null,
+        result_json: JSON.stringify({ reply: "accepted" }),
+        promotion_result: promotion,
+      });
+    } finally {
+      releaseMarkFailed?.();
+      reactor.markFailed = originalMarkFailed;
+    }
+  });
 });
 
 describe("POST /agent-done — input validation", () => {

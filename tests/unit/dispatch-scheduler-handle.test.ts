@@ -682,6 +682,71 @@ describe("handleAgentDone — queued-dispatch closeout (Spec 2026-06-01)", () =>
     expect(final?.failure_detail).toContain("failed after async run");
   });
 
+  it("rejects a concurrent failure when a verified-promotion success wins without emitting failed", async () => {
+    const statusChanges: string[] = [];
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+      onDispatchStatusChanged: (_phid, status) => statusChanges.push(status),
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "promotion closeout race",
+      repo: "/tmp/id-agents",
+      branch: "feature/race",
+    });
+    await handle.reactor.claim(enq.dispatch_phid);
+
+    const originalMarkFailed = handle.reactor.markFailed.bind(handle.reactor);
+    let markFailedEntered!: () => void;
+    let releaseMarkFailed!: () => void;
+    const entered = new Promise<void>((resolve) => { markFailedEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseMarkFailed = resolve; });
+    handle.reactor.markFailed = async (...args) => {
+      markFailedEntered();
+      await release;
+      return originalMarkFailed(...args);
+    };
+
+    const failureAttempt = handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: false,
+      failure_kind: "agent_error",
+      error: "simultaneous failure",
+    });
+    await entered;
+
+    const promotion = {
+      required: true,
+      completed: true,
+      repos: [{
+        path: "/tmp/id-agents",
+        base: "main",
+        source_branch: "feature/race",
+        strategy: "fast_forward",
+        promoted_sha: "abc123",
+        remote_main_sha: "abc123",
+        pushed: true,
+        verified: true,
+      }],
+    };
+    const successWinner = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: true,
+      result: { reply: "accepted" },
+      promotion_result_json: JSON.stringify(promotion),
+    });
+    releaseMarkFailed();
+
+    expect(successWinner?.status).toBe("done");
+    await expect(failureAttempt).rejects.toMatchObject({ code: "REACTOR_CONFLICT" });
+    expect(statusChanges).not.toContain("failed");
+    const stored = await handle.reactor.getByPhid(enq.dispatch_phid);
+    expect(stored).toMatchObject({ status: "done", failure_kind: null, promotion_result: promotion });
+  });
+
   it("non-queued non-in_flight state (needs_clarification) remains guarded — no silent done", async () => {
     const handle = new SchedulerHandle({
       adapter,
