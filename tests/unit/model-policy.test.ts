@@ -197,13 +197,13 @@ describe("loadModelPolicy degradation", () => {
 });
 
 describe("Slice G project-agent policy migration", () => {
-  const claudePrimaryAgents = new Set(["frontend-ui-codex", "maestra", "rams"]);
   const projectAgents = [
     "blowout",
     "brunel",
     "cane",
     "cleveland-park",
     "cto",
+    "cursor-coder-pilot",
     "defi",
     "eames",
     "finances",
@@ -221,7 +221,7 @@ describe("Slice G project-agent policy migration", () => {
     "trinity",
   ];
 
-  it("uses 5.6 Sol for Codex and Fable 5 for every Claude execution", () => {
+  it("uses the bounded Cursor pilot and Codex Sol with Fable for every Claude execution elsewhere", () => {
     const svc = loadModelPolicy({
       configPath: "configs/model-policy.json",
       onWarn: (msg) => {
@@ -233,13 +233,14 @@ describe("Slice G project-agent policy migration", () => {
     for (const agent of projectAgents) {
       const policy = svc.policyForAgent(agent);
       expect(policy.agent).toBe(agent);
-      if (claudePrimaryAgents.has(agent)) {
-        expect(policy.primary).toMatchObject({ runtime: "claude-code-cli", model: "claude-fable-5", provider: "anthropic" });
+      if (agent === "cursor-coder-pilot") {
+        expect(policy.primary).toMatchObject({ runtime: "cursor-cli", model: "cursor-grok-4.5-high", provider: "cursor" });
         expect(policy.fallback[0]).toMatchObject({ runtime: "codex", model: "gpt-5.6-sol", provider: "openai" });
       } else {
         expect(policy.primary).toMatchObject({ runtime: "codex", model: "gpt-5.6-sol", provider: "openai" });
         expect(policy.fallback[0]).toMatchObject({ runtime: "claude-code-cli", model: "claude-fable-5", provider: "anthropic" });
       }
     }
+    expect(svc.config.constrained_providers).toEqual(["cursor"]);
   });
 });

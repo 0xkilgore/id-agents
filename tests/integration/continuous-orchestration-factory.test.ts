@@ -42,6 +42,35 @@ const usageService = {
   }),
 };
 
+const matchingModelPolicy = () => ({
+  status: "match" as const,
+  policy_path: "test://model-policy.json",
+  directive_targets: { anthropic: 0.25, openai: 0.75, cursor: 0 },
+  work_share_targets: { anthropic: 0.25, openai: 0.75, cursor: 0 },
+  diffs: [],
+  message: null,
+});
+
+const okDiskHeadroom = async () => ({
+  schema_version: "disk-headroom.v1" as const,
+  state: "ok" as const,
+  path: "/tmp",
+  free_bytes: 50 * 1024 ** 3,
+  available_bytes: 50 * 1024 ** 3,
+  total_bytes: 100 * 1024 ** 3,
+  free_gib: 50,
+  available_gib: 50,
+  total_gib: 100,
+  used_percent: 50,
+  min_free_bytes: 15 * 1024 ** 3,
+  warn_free_bytes: 25 * 1024 ** 3,
+  consumption_bytes_per_hour_1h: null,
+  consumption_bytes_per_hour_6h: null,
+  largest_recent_checkout_growth: null,
+  protected_checkouts: [],
+  reason: null,
+});
+
 let adapter: SqliteAdapter;
 beforeEach(async () => {
   adapter = await freshDb();
@@ -75,6 +104,8 @@ describe("factory readInFlight — daemon-own lane, not fleet-wide", () => {
       adapter,
       scheduler: scheduler as never,
       usageService: usageService as never,
+      readModelPolicyDirectiveDrift: matchingModelPolicy,
+      readDiskHeadroom: okDiskHeadroom,
       // enabled + live + a real lane budget; the fleet's 20 in-flight must NOT
       // count against the daemon's own max_in_flight.
       config: { ...defaultConfig(), enabled: true, dry_run: false, max_in_flight: 4 },
@@ -82,7 +113,6 @@ describe("factory readInFlight — daemon-own lane, not fleet-wide", () => {
     await daemon.setMode("running");
 
     const r = await daemon.runTick();
-
     // Pre-fix: count=20 (fleet) >= max_in_flight=4 -> slotsFree=0 -> 0 fired.
     // Post-fix: daemon-own in_flight=0 -> fires the ready item.
     expect(r.halted).toBeNull();
@@ -128,6 +158,8 @@ describe("factory readInFlight — daemon-own lane, not fleet-wide", () => {
       adapter,
       scheduler: guardingScheduler as never,
       usageService: usageService as never,
+      readModelPolicyDirectiveDrift: matchingModelPolicy,
+      readDiskHeadroom: okDiskHeadroom,
       // teamId omitted -> CO storage uses "default" (matches the inserted backlog).
       config: { ...defaultConfig(), enabled: true, dry_run: false, max_in_flight: 4 },
     });
@@ -171,6 +203,8 @@ describe("factory readInFlight — daemon-own lane, not fleet-wide", () => {
       adapter,
       scheduler: scheduler as never,
       usageService: usageService as never,
+      readModelPolicyDirectiveDrift: matchingModelPolicy,
+      readDiskHeadroom: okDiskHeadroom,
       config: { ...defaultConfig(), enabled: true, dry_run: false, max_in_flight: 4 },
     });
     await daemon.setMode("running");

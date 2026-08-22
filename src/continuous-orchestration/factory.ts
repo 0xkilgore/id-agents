@@ -18,7 +18,8 @@ import { BuildPoolRegistry } from "../build-pools/index.js";
 import { leaseWorktreePath } from "../workspaces/allocator.js";
 import { randomUUID } from "node:crypto";
 import { normalizeRuntime } from "../dispatch-scheduler/types.js";
-import { readDiskHeadroom } from "../disk-health.js";
+import { readDiskHeadroom, type DiskHeadroom } from "../disk-health.js";
+import type { WorkShareDirectiveDrift } from "../model-policy/work-share-drift.js";
 
 interface SchedulerLike {
   enqueue(
@@ -41,6 +42,10 @@ export interface BuildDaemonOptions {
   config?: ContinuousOrchestrationConfig;
   env?: NodeJS.ProcessEnv;
   teamId?: string;
+  /** Deterministic seam for callers/tests that must not inherit process.cwd() operator policy. */
+  readModelPolicyDirectiveDrift?: () => WorkShareDirectiveDrift;
+  /** Deterministic seam for callers/tests that must not inherit host disk pressure. */
+  readDiskHeadroom?: () => DiskHeadroom | Promise<DiskHeadroom>;
 }
 
 export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
@@ -55,6 +60,7 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
     config,
     teamId,
     env: opts.env,
+    readModelPolicyDirectiveDrift: opts.readModelPolicyDirectiveDrift,
 
     enqueue: async (item: BacklogItem) => {
       const input: EnqueueInputV2 = {
@@ -130,7 +136,7 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
     // Read-only admission/status projections run even while the daemon is
     // disabled. Keep those control-plane reads from spawning `du` over large
     // Dropbox-backed checkouts on the manager event loop.
-    readDiskHeadroom: () => readDiskHeadroom({ measureCheckoutSizes: false }),
+    readDiskHeadroom: opts.readDiskHeadroom ?? (() => readDiskHeadroom({ measureCheckoutSizes: false })),
     emitNews: opts.emitNews,
 
     // Stage C build-pool routing: late-bind builder + a distinct worktree
