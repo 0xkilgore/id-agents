@@ -1,5 +1,6 @@
 import type { DbAdapter } from '../db/db-adapter.js';
 import {
+  parseReportPromotionRequest,
   recordReportPromotionRequest,
   type ReportCandidateReceipt,
   type ReportCandidateWriteResult,
@@ -29,7 +30,7 @@ export async function exportReportCandidateOutboxEntry(
 
   let request: ReportPromotionRequest;
   try {
-    request = JSON.parse(row.report_candidate_request_json) as ReportPromotionRequest;
+    request = parseReportPromotionRequest(JSON.parse(row.report_candidate_request_json));
   } catch {
     const receipt = corruptedOutboxReceipt(dispatchId);
     await markExportResult(adapter, dispatchId, receipt, now);
@@ -60,13 +61,19 @@ export async function flushPendingReportCandidateOutbox(
   let exported = 0;
   let failed = 0;
   for (const row of rows) {
-    const receipt = await exportReportCandidateOutboxEntry(
-      adapter,
-      row.dispatch_phid,
-      configuredDirectory,
-    );
-    if (receipt?.status === 'recorded' || receipt?.status === 'already_recorded') exported += 1;
-    else failed += 1;
+    try {
+      const receipt = await exportReportCandidateOutboxEntry(
+        adapter,
+        row.dispatch_phid,
+        configuredDirectory,
+      );
+      if (receipt?.status === 'recorded' || receipt?.status === 'already_recorded') exported += 1;
+      else failed += 1;
+    } catch {
+      // One database/update failure is one failed row, never permission to
+      // starve the remaining bounded batch.
+      failed += 1;
+    }
   }
   return { attempted: rows.length, exported, failed };
 }
@@ -83,7 +90,7 @@ export async function loadStoredReportPromotionRequest(
   );
   if (!rows[0]) return null;
   try {
-    return JSON.parse(rows[0].report_candidate_request_json) as ReportPromotionRequest;
+    return parseReportPromotionRequest(JSON.parse(rows[0].report_candidate_request_json));
   } catch {
     return null;
   }

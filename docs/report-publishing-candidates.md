@@ -15,6 +15,12 @@ same terminal database update. A boot/periodic outbox worker exports it to
 `REPORT_PROMOTION_REQUEST_DIR`; an export crash or unavailable directory cannot
 erase the nomination.
 
+Terminal writes are database compare-and-set operations on both SQLite and
+PostgreSQL. The first success/failure/cancellation wins; an exact simultaneous
+retry recovers the winner, while a conflicting closeout cannot overwrite its
+result or candidate. Malformed durable outbox rows are quarantined individually
+so later valid requests continue exporting.
+
 Set `REPORT_PROMOTION_ALLOWED_ROOT` to the absolute canonical output root.
 Candidates must be canonical, single-link, nonempty valid UTF-8 Markdown at
 most 256 KiB beneath it. Set `REPORT_PROMOTION_REQUEST_DIR` only to an absolute,

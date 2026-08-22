@@ -10,7 +10,7 @@
 // `max_in_flight` check happens inside the lock against the current
 // row state.
 
-import type { SqliteAdapter } from "../db/sqlite-adapter.js";
+import type { DbAdapter } from "../db/db-adapter.js";
 import type {
   BounceInput,
   ClaimResult,
@@ -108,7 +108,7 @@ interface Row {
 }
 
 export interface SqliteDispatchReactorOptions {
-  adapter: SqliteAdapter;
+  adapter: DbAdapter;
   teamId: string;
   now: () => string;
 }
@@ -118,7 +118,7 @@ export interface EnqueueInputWithTarget extends EnqueueInput {
 }
 
 export class SqliteDispatchReactor {
-  private adapter: SqliteAdapter;
+  private adapter: DbAdapter;
   private teamId: string;
   private nowFn: () => string;
   private claimLock: Promise<unknown> = Promise.resolve();
@@ -461,12 +461,19 @@ export class SqliteDispatchReactor {
       throw conflict(`markDone requires in_flight, was ${doc.status}`);
     }
     const now = this.nowFn();
-    await this.adapter.query(
+    const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'done', completed_at = ?, updated_at = ?
-       WHERE dispatch_phid = ?`,
+       WHERE dispatch_phid = ? AND status = 'in_flight'`,
       [now, now, phid],
     );
+    if (updated.rowCount === 0) {
+      return this.resolveTerminalCasResult(phid, 'markDone', {
+        status: 'done',
+        resultJson: null,
+        reportCandidateRequestJson: null,
+      });
+    }
     return this.getByPhid(phid);
   }
 
@@ -485,24 +492,32 @@ export class SqliteDispatchReactor {
       result && typeof result.artifact_path === "string" && result.artifact_path.length > 0
         ? result.artifact_path
         : null;
-    await this.adapter.query(
+    const resultJson = result ? JSON.stringify(result) : null;
+    const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?,
            report_candidate_request_json = ?,
            report_candidate_export_status = CASE WHEN ? IS NULL THEN NULL ELSE 'pending' END,
            report_candidate_export_attempted_at = NULL,
            report_candidate_export_error = NULL
-       WHERE dispatch_phid = ?`,
+       WHERE dispatch_phid = ? AND status = 'in_flight'`,
       [
         now,
         now,
-        result ? JSON.stringify(result) : null,
+        resultJson,
         artifactPath,
         reportCandidateRequestJson,
         reportCandidateRequestJson,
         phid,
       ],
     );
+    if (updated.rowCount === 0) {
+      return this.resolveTerminalCasResult(phid, 'markDoneWithResult', {
+        status: 'done',
+        resultJson,
+        reportCandidateRequestJson,
+      });
+    }
     return this.getByPhid(phid);
   }
 
@@ -537,7 +552,8 @@ export class SqliteDispatchReactor {
       result && typeof result.artifact_path === "string" && result.artifact_path.length > 0
         ? result.artifact_path
         : null;
-    await this.adapter.query(
+    const resultJson = result ? JSON.stringify(result) : null;
+    const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?,
            report_candidate_request_json = ?,
@@ -548,13 +564,20 @@ export class SqliteDispatchReactor {
       [
         now,
         now,
-        result ? JSON.stringify(result) : null,
+        resultJson,
         artifactPath,
         reportCandidateRequestJson,
         reportCandidateRequestJson,
         phid,
       ],
     );
+    if (updated.rowCount === 0) {
+      return this.resolveTerminalCasResult(phid, 'markQueuedDoneWithResult', {
+        status: 'done',
+        resultJson,
+        reportCandidateRequestJson,
+      });
+    }
     return this.getByPhid(phid);
   }
 
@@ -651,13 +674,13 @@ export class SqliteDispatchReactor {
       laneSets.push("runtime = ?");
       laneParams.push(bounce.runtime);
     }
-    await this.adapter.query(
+    const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'bounced', bounce_count = bounce_count + 1,
            last_bounce_json = ?, bounce_history_json = ?,
            not_before_at = ?, updated_at = ?, allow_auto_retry = ?
            ${laneSets.length ? ", " + laneSets.join(", ") : ""}
-       WHERE dispatch_phid = ?`,
+       WHERE dispatch_phid = ? AND status = ?`,
       [
         JSON.stringify(record),
         JSON.stringify(history),
@@ -666,8 +689,12 @@ export class SqliteDispatchReactor {
         bounce.allow_auto_retry ? 1 : doc.allow_auto_retry ? 1 : 0,
         ...laneParams,
         phid,
+        doc.status,
       ],
     );
+    if (updated.rowCount === 0) {
+      throw conflict(`markBounced lost compare-and-set from ${doc.status}`);
+    }
     return this.getByPhid(phid);
   }
 
@@ -681,12 +708,13 @@ export class SqliteDispatchReactor {
     if (doc.not_before_at > now) {
       throw conflict(`requeue blocked until ${doc.not_before_at}`);
     }
-    await this.adapter.query(
+    const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'queued', updated_at = ?
-       WHERE dispatch_phid = ?`,
+       WHERE dispatch_phid = ? AND status = 'bounced'`,
       [now, phid],
     );
+    if (updated.rowCount === 0) throw conflict('requeue lost compare-and-set from bounced');
     return this.getByPhid(phid);
   }
 
@@ -697,13 +725,20 @@ export class SqliteDispatchReactor {
       throw conflict(`cancel cannot run from terminal ${doc.status}`);
     }
     const now = this.nowFn();
-    await this.adapter.query(
+    const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'cancelled', failure_kind = ?, failure_detail = ?,
            completed_at = ?, updated_at = ?
-       WHERE dispatch_phid = ?`,
-      ["cancelled", detail, now, now, phid],
+       WHERE dispatch_phid = ? AND status = ?`,
+      ["cancelled", detail, now, now, phid, doc.status],
     );
+    if (updated.rowCount === 0) {
+      return this.resolveTerminalCasResult(phid, 'cancel', {
+        status: 'cancelled',
+        failureKind: 'cancelled',
+        failureDetail: detail,
+      });
+    }
     return this.getByPhid(phid);
   }
 
@@ -713,19 +748,66 @@ export class SqliteDispatchReactor {
   ): Promise<DispatchDoc | null> {
     const doc = await this.getByPhid(phid);
     if (!doc) return null;
-    if (doc.status === "done" || doc.status === "cancelled") {
+    if (isTerminal(doc.status)) {
       throw conflict(`markRetryExhausted cannot run from terminal ${doc.status}`);
     }
     const now = this.nowFn();
     const failureKind = exhaustedFailureKind(doc.last_bounce?.kind ?? null);
-    await this.adapter.query(
+    const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'failed', failure_kind = ?,
            failure_detail = ?, completed_at = ?, updated_at = ?
-       WHERE dispatch_phid = ?`,
-      [failureKind, detail, now, now, phid],
+       WHERE dispatch_phid = ? AND status = ?`,
+      [failureKind, detail, now, now, phid, doc.status],
     );
+    if (updated.rowCount === 0) {
+      return this.resolveTerminalCasResult(phid, 'markRetryExhausted', {
+        status: 'failed',
+        failureKind,
+        failureDetail: detail,
+      });
+    }
     return this.getByPhid(phid);
+  }
+
+  private async resolveTerminalCasResult(
+    phid: string,
+    operation: string,
+    expected:
+      | {
+          status: 'done';
+          resultJson: string | null;
+          reportCandidateRequestJson: string | null;
+        }
+      | {
+          status: 'failed' | 'cancelled';
+          failureKind: FailureKind;
+          failureDetail: string;
+        },
+  ): Promise<DispatchDoc | null> {
+    const { rows } = await this.adapter.query<{
+      status: SchedulerStatus;
+      result_json: string | null;
+      report_candidate_request_json: string | null;
+      failure_kind: FailureKind | null;
+      failure_detail: string | null;
+    }>(
+      `SELECT status, result_json, report_candidate_request_json, failure_kind, failure_detail
+         FROM dispatch_scheduler_queue
+        WHERE dispatch_phid = ?`,
+      [phid],
+    );
+    const winner = rows[0];
+    if (!winner) return null;
+    const exact = expected.status === 'done'
+      ? winner.status === 'done'
+        && winner.result_json === expected.resultJson
+        && winner.report_candidate_request_json === expected.reportCandidateRequestJson
+      : winner.status === expected.status
+        && winner.failure_kind === expected.failureKind
+        && winner.failure_detail === expected.failureDetail;
+    if (exact) return this.getByPhid(phid);
+    throw conflict(`${operation} lost terminal compare-and-set; winner is ${winner.status}`);
   }
 
   async listInFlight(provider?: Provider, runtime?: Runtime): Promise<DispatchDoc[]> {

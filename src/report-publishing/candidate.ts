@@ -171,6 +171,84 @@ export function buildReportPromotionRequest(candidateValue: unknown, context: Ca
   };
 }
 
+/**
+ * Re-admit a durable outbox row before projecting it to the filesystem.
+ * The database is durable storage, not a type system: a corrupt or manually
+ * altered JSON value must fail as one bounded row instead of reaching the
+ * writer or starving later outbox entries.
+ */
+export function parseReportPromotionRequest(value: unknown): ReportPromotionRequest {
+  const root = record(value, 'REPORT_PROMOTION_REQUEST_INVALID');
+  exactKeys(root, [
+    'schemaVersion',
+    'contentPath',
+    'title',
+    'reportRef',
+    'sourceRef',
+    'expectedContentHash',
+    'expectedByteSize',
+    'projectRef',
+    'familyRef',
+    'producer',
+    'attention',
+    'occurredAt',
+  ], 'REPORT_PROMOTION_REQUEST_UNKNOWN_FIELD');
+  if (root.schemaVersion !== REPORT_PROMOTION_REQUEST_SCHEMA_VERSION) {
+    throw new Error('REPORT_PROMOTION_REQUEST_SCHEMA_UNSUPPORTED');
+  }
+  const contentPath = trustedText(root.contentPath, 'contentPath', 4_000);
+  if (!isAbsolute(contentPath) || !['.md', '.markdown'].includes(extname(contentPath).toLowerCase())) {
+    throw new Error('REPORT_PROMOTION_REQUEST_CONTENT_PATH_INVALID');
+  }
+  const sourceRef = trustedText(root.sourceRef, 'sourceRef', MAX_REF_LENGTH);
+  if (!sourceRef.startsWith('kapelle-dispatch://')) throw new Error('REPORT_PROMOTION_REQUEST_SOURCE_REF_INVALID');
+  const expectedContentHash = trustedContentHash(root.expectedContentHash);
+  if (!Number.isSafeInteger(root.expectedByteSize) || Number(root.expectedByteSize) < 1 || Number(root.expectedByteSize) > MAX_MARKDOWN_BYTES) {
+    throw new Error('REPORT_PROMOTION_REQUEST_CONTENT_SIZE_INVALID');
+  }
+
+  const producer = record(root.producer, 'REPORT_PROMOTION_REQUEST_PRODUCER_INVALID');
+  exactKeys(producer, ['kind', 'id', 'label'], 'REPORT_PROMOTION_REQUEST_PRODUCER_UNKNOWN_FIELD');
+  if (producer.kind !== 'SERVICE' || producer.id !== 'agent-manager' || producer.label !== 'Agent Manager') {
+    throw new Error('REPORT_PROMOTION_REQUEST_PRODUCER_INVALID');
+  }
+
+  const attention = record(root.attention, 'REPORT_PROMOTION_REQUEST_ATTENTION_INVALID');
+  exactKeys(attention, ['request', 'reasonCode', 'reason', 'reviewBy', 'expiresAt'], 'REPORT_PROMOTION_REQUEST_ATTENTION_UNKNOWN_FIELD');
+  const attentionRequest = text(attention.request, 'attention.request', 32) as ReportAttentionRequest;
+  if (!['NONE', 'READ', 'ANSWER', 'DECIDE', 'APPROVE', 'REQUEST_CHANGE'].includes(attentionRequest)) {
+    throw new Error('REPORT_PROMOTION_REQUEST_ATTENTION_KIND_INVALID');
+  }
+  const reasonCode = optionalText(attention.reasonCode, 'attention.reasonCode', 500);
+  const reason = optionalText(attention.reason, 'attention.reason', MAX_REASON_LENGTH);
+  const reviewBy = optionalIso(attention.reviewBy, 'attention.reviewBy');
+  const expiresAt = optionalIso(attention.expiresAt, 'attention.expiresAt');
+  if (attentionRequest === 'NONE' && [reasonCode, reason, reviewBy, expiresAt].some((entry) => entry !== null)) {
+    throw new Error('REPORT_PROMOTION_REQUEST_ATTENTION_METADATA_WITHOUT_REQUEST');
+  }
+
+  return {
+    schemaVersion: REPORT_PROMOTION_REQUEST_SCHEMA_VERSION,
+    contentPath,
+    title: text(root.title, 'title', MAX_TITLE_LENGTH),
+    reportRef: stableRef(root.reportRef, 'reportRef', MAX_REF_LENGTH),
+    sourceRef,
+    expectedContentHash,
+    expectedByteSize: Number(root.expectedByteSize),
+    ...(root.projectRef === undefined ? {} : { projectRef: optionalText(root.projectRef, 'projectRef', MAX_REF_LENGTH) }),
+    ...(root.familyRef === undefined ? {} : { familyRef: optionalText(root.familyRef, 'familyRef', MAX_REF_LENGTH) }),
+    producer: { kind: 'SERVICE', id: 'agent-manager', label: 'Agent Manager' },
+    attention: {
+      request: attentionRequest,
+      ...(reasonCode === null ? {} : { reasonCode }),
+      ...(reason === null ? {} : { reason }),
+      ...(reviewBy === null ? {} : { reviewBy }),
+      ...(expiresAt === null ? {} : { expiresAt }),
+    },
+    occurredAt: strictIso(root.occurredAt, 'occurredAt'),
+  };
+}
+
 export function admitReportCandidateArtifact(
   contentPathValue: unknown,
   allowedRootValue: string | undefined,

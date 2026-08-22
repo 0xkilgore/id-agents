@@ -41,6 +41,7 @@ import type {
   FailureKind,
   PromotionInput,
   Provider,
+  Result,
   Runtime,
 } from "./types.js";
 import {
@@ -49,7 +50,7 @@ import {
   resolveProviderFromRuntime,
   validateEnqueueSkipReason,
 } from "./types.js";
-import type { SqliteAdapter } from "../db/sqlite-adapter.js";
+import type { DbAdapter } from "../db/db-adapter.js";
 import type { AgentsRepository, QueriesRepository } from "../db/db-service.js";
 import type { AgentRow } from "../db/types.js";
 import { QueriesEvidenceClient } from "./queries-evidence-client.js";
@@ -80,7 +81,7 @@ export interface SchedulerEnv {
 }
 
 export interface SchedulerHandleOptions {
-  adapter: SqliteAdapter;
+  adapter: DbAdapter;
   teamId: string;
   resolveTargetUrl: (agent: string, doc?: DispatchDoc) => Promise<string | null> | string | null;
   env?: SchedulerEnv;
@@ -919,7 +920,7 @@ export class SchedulerHandle {
         failure_kind: args.failure_kind ?? "agent_error",
         detail: args.error ?? "agent reported failure",
       });
-      return r.ok ? r.value : doc;
+      return this.requireAgentDoneMutation(r, 'markFailed');
     }
     // Dispatch-canonical strict-mode (CTO-4): even with success=true,
     // inspect the response body for known provider/runtime error
@@ -961,7 +962,7 @@ export class SchedulerHandle {
         allow_auto_retry: true,
         ...(fallback ? { provider: fallback.provider, runtime: fallback.runtime } : {}),
       });
-      return bounced.ok ? bounced.value : doc;
+      return this.requireAgentDoneMutation(bounced, 'markBounced');
     }
     const strictModeFlag = parseStrictModeFlag(
       process.env.DISPATCH_CANONICAL_STRICT_MODE,
@@ -978,7 +979,7 @@ export class SchedulerHandle {
             failure_kind: decision.failure_kind,
             detail: decision.detail,
           });
-          return r.ok ? r.value : doc;
+          return this.requireAgentDoneMutation(r, 'strictModeMarkFailed');
         }
       }
     }
@@ -1005,6 +1006,13 @@ export class SchedulerHandle {
       args.result ?? null,
       args.report_candidate_request_json ?? null,
     );
+  }
+
+  private requireAgentDoneMutation(result: Result<DispatchDoc>, operation: string): DispatchDoc {
+    if (result.ok) return result.value;
+    const error = new Error(`${operation}: ${result.detail}`) as Error & { code: string };
+    error.code = result.reason === 'conflict' ? 'REACTOR_CONFLICT' : 'REACTOR_ERROR';
+    throw error;
   }
 
   private resolveFallbackLaneForProviderLimit(doc: DispatchDoc): { provider: Provider; runtime: Runtime } | null {

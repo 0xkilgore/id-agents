@@ -309,6 +309,90 @@ describe("SqliteDispatchReactor — round-trip parity with FakeReactor", () => {
     expect(result).toEqual({ reply: "all done", tokens: 42 });
   });
 
+  it("preserves the first durable candidate across simultaneous exact closeouts", async () => {
+    const { client, reactor } = harness();
+    const enq = await client.enqueueDispatch({ ...base, query_id: "race-exact" });
+    if (!enq.ok) throw new Error();
+    const phid = enq.value.dispatch_phid;
+    await client.claimForStart({ limit: 1 });
+    const result = { reply: "done", artifact_path: "/safe/report.md" };
+    const candidate = JSON.stringify({ schemaVersion: "report-promotion-request.v2", marker: "same" });
+
+    const [first, second] = await Promise.all([
+      reactor.markDoneWithResult(phid, result, candidate),
+      reactor.markDoneWithResult(phid, result, candidate),
+    ]);
+    expect(first?.status).toBe("done");
+    expect(second?.status).toBe("done");
+    const stored = await adapter.query<{ result_json: string; report_candidate_request_json: string }>(
+      `SELECT result_json, report_candidate_request_json FROM dispatch_scheduler_queue WHERE dispatch_phid = ?`,
+      [phid],
+    );
+    expect(stored.rows[0]).toEqual({ result_json: JSON.stringify(result), report_candidate_request_json: candidate });
+  });
+
+  it("preserves the first durable candidate across simultaneous conflicting closeouts", async () => {
+    const { client, reactor } = harness();
+    const enq = await client.enqueueDispatch({ ...base, query_id: "race-conflict" });
+    if (!enq.ok) throw new Error();
+    const phid = enq.value.dispatch_phid;
+    await client.claimForStart({ limit: 1 });
+    const attempts = await Promise.allSettled([
+      reactor.markDoneWithResult(phid, { reply: "first" }, "candidate-first"),
+      reactor.markDoneWithResult(phid, { reply: "second" }, "candidate-second"),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    const stored = await adapter.query<{ result_json: string; report_candidate_request_json: string }>(
+      `SELECT result_json, report_candidate_request_json FROM dispatch_scheduler_queue WHERE dispatch_phid = ?`,
+      [phid],
+    );
+    const winner = stored.rows[0];
+    expect([
+      { result_json: JSON.stringify({ reply: "first" }), report_candidate_request_json: "candidate-first" },
+      { result_json: JSON.stringify({ reply: "second" }), report_candidate_request_json: "candidate-second" },
+    ]).toContainEqual(winner);
+  });
+
+  it("never lets a simultaneous failure overwrite a successful candidate", async () => {
+    const { client, reactor } = harness();
+    const enq = await client.enqueueDispatch({ ...base, query_id: "race-success-failure" });
+    if (!enq.ok) throw new Error();
+    const phid = enq.value.dispatch_phid;
+    await client.claimForStart({ limit: 1 });
+    const attempts = await Promise.allSettled([
+      reactor.markDoneWithResult(phid, { reply: "success" }, "candidate-success"),
+      reactor.markFailed(phid, { failure_kind: "agent_error", detail: "late failure" }),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    const stored = await adapter.query<{
+      status: string;
+      result_json: string | null;
+      report_candidate_request_json: string | null;
+      failure_detail: string | null;
+    }>(
+      `SELECT status, result_json, report_candidate_request_json, failure_detail
+         FROM dispatch_scheduler_queue WHERE dispatch_phid = ?`,
+      [phid],
+    );
+    const winner = stored.rows[0];
+    if (winner.status === "done") {
+      expect(winner).toMatchObject({
+        result_json: JSON.stringify({ reply: "success" }),
+        report_candidate_request_json: "candidate-success",
+        failure_detail: null,
+      });
+    } else {
+      expect(winner).toMatchObject({
+        status: "failed",
+        result_json: null,
+        report_candidate_request_json: null,
+        failure_detail: "late failure",
+      });
+    }
+  });
+
   it("two-team isolation: same query_id in different teams does not collide", async () => {
     const { client } = harness();
     await adapter.query(`INSERT INTO teams (id, name) VALUES ('team-other', 'other')`);

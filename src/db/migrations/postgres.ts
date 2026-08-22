@@ -798,6 +798,13 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
         WHERE table_schema = 'public' AND table_name = 'dispatch_scheduler_queue'
       ) THEN
         ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS artifact_path text;
+        -- Report candidate outbox. These columns mirror the SQLite schema so
+        -- every terminal closeout uses the same adapter-neutral CAS update,
+        -- including legacy closeouts that store NULL here.
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS report_candidate_request_json text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS report_candidate_export_status text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS report_candidate_export_attempted_at text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS report_candidate_export_error text;
         -- Recovery-state columns. Additive, default-safe, idempotent.
         ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS recovery_status text DEFAULT 'none';
         ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS recovery_attempts integer NOT NULL DEFAULT 0;

@@ -2830,7 +2830,7 @@ export class AgentManagerDb {
   }
 
   private startReportCandidateOutbox(): void {
-    if (this.reportCandidateOutboxInterval || this.db.adapter.dialect !== 'sqlite') return;
+    if (this.reportCandidateOutboxInterval) return;
     const run = async () => {
       try {
         const requestDirectory = process.env.REPORT_PROMOTION_REQUEST_DIR;
@@ -5556,6 +5556,16 @@ export class AgentManagerDb {
               ? JSON.stringify(reportPromotionRequest)
               : null,
           });
+          if (
+            (!success && terminalDoc?.status !== 'failed')
+            || (reportPromotionRequest && terminalDoc?.status !== 'done')
+          ) {
+            const error = new Error(
+              `agent-done terminal conflict: winner is ${terminalDoc?.status ?? 'missing'}`,
+            ) as Error & { code: string };
+            error.code = 'REACTOR_CONFLICT';
+            throw error;
+          }
           if (this.db.events && terminalDoc) {
             const eventTeamId = await this.db.queries.findTeam(terminalDoc.query_id)
               ?? await this.db.teams.getOrCreateTeamId('default');
@@ -5577,7 +5587,8 @@ export class AgentManagerDb {
           this.managerLog(
             `[agent-done] handleAgentDone failed: ${err instanceof Error ? err.message : String(err)}`,
           );
-          return res.status(500).json({
+          const status = err && typeof err === 'object' && 'code' in err && err.code === 'REACTOR_CONFLICT' ? 409 : 500;
+          return res.status(status).json({
             ok: false,
             error: err instanceof Error ? err.message : String(err),
           });
@@ -14364,7 +14375,7 @@ export class AgentManagerDb {
               console.warn('[Manager] T-RELIABILITY classification sweep failed:', err instanceof Error ? err.message : String(err));
             }
             this.dispatchScheduler = new SchedulerHandle({
-              adapter: this.db.adapter as SqliteAdapter,
+              adapter: this.db.adapter,
               teamId: defaultTeamId,
               // B0 (2026-06-08): plumb the queries repo into the scheduler so
               // its terminal-closeout + silence-detection passes can read
