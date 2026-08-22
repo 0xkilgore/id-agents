@@ -866,6 +866,7 @@ export class SchedulerHandle {
     agent_query_id?: string;
     result?: Record<string, unknown> | null;
     report_candidate_request_json?: string | null;
+    promotion_result_json?: string | null;
     success?: boolean;
     error?: string;
     // Harness-resilience (Spec 2026-05-29): structured failure kind from
@@ -1002,6 +1003,7 @@ export class SchedulerHandle {
         doc,
         args.result ?? null,
         args.report_candidate_request_json ?? null,
+        args.promotion_result_json ?? null,
       );
     }
     // Queued-dispatch closeout (Spec 2026-06-01): an out-of-band success
@@ -1020,12 +1022,14 @@ export class SchedulerHandle {
         doc.dispatch_phid,
         args.result ?? null,
         args.report_candidate_request_json ?? null,
+        args.promotion_result_json ?? null,
       );
     }
     return this.reactor.markDoneWithResult(
       doc.dispatch_phid,
       args.result ?? null,
       args.report_candidate_request_json ?? null,
+      args.promotion_result_json ?? null,
     );
   }
 
@@ -1044,12 +1048,14 @@ export class SchedulerHandle {
     doc: DispatchDoc,
     result: Record<string, unknown> | null,
     reportCandidateRequestJson: string | null,
+    promotionResultJson: string | null,
   ): DispatchDoc {
     const resultJson = result ? JSON.stringify(result) : null;
     if (
       doc.status === "done"
       && (doc.result_json ?? null) === resultJson
       && (doc.report_candidate_request_json ?? null) === reportCandidateRequestJson
+      && (doc.promotion_result_json ?? null) === promotionResultJson
     ) {
       return doc;
     }

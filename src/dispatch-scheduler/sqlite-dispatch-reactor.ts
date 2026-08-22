@@ -473,6 +473,7 @@ export class SqliteDispatchReactor {
         status: 'done',
         resultJson: null,
         reportCandidateRequestJson: null,
+        promotionResultJson: null,
       });
     }
     return this.getByPhid(phid);
@@ -482,6 +483,7 @@ export class SqliteDispatchReactor {
     phid: string,
     result: Record<string, unknown> | null,
     reportCandidateRequestJson: string | null = null,
+    promotionResultJson: string | null = null,
   ): Promise<DispatchDoc | null> {
     const doc = await this.getByPhid(phid);
     if (!doc) return null;
@@ -498,6 +500,7 @@ export class SqliteDispatchReactor {
     const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?,
+           promotion_result_json = ?,
            report_candidate_request_json = ?,
            report_candidate_export_status = ?,
            report_candidate_export_attempted_at = NULL,
@@ -508,6 +511,7 @@ export class SqliteDispatchReactor {
         now,
         resultJson,
         artifactPath,
+        promotionResultJson,
         reportCandidateRequestJson,
         exportStatus,
         phid,
@@ -518,6 +522,7 @@ export class SqliteDispatchReactor {
         status: 'done',
         resultJson,
         reportCandidateRequestJson,
+        promotionResultJson,
       });
     }
     return this.getByPhid(phid);
@@ -541,6 +546,7 @@ export class SqliteDispatchReactor {
     phid: string,
     result: Record<string, unknown> | null,
     reportCandidateRequestJson: string | null = null,
+    promotionResultJson: string | null = null,
   ): Promise<DispatchDoc | null> {
     const doc = await this.getByPhid(phid);
     if (!doc) return null;
@@ -559,6 +565,7 @@ export class SqliteDispatchReactor {
     const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?,
+           promotion_result_json = ?,
            report_candidate_request_json = ?,
            report_candidate_export_status = ?,
            report_candidate_export_attempted_at = NULL,
@@ -569,6 +576,7 @@ export class SqliteDispatchReactor {
         now,
         resultJson,
         artifactPath,
+        promotionResultJson,
         reportCandidateRequestJson,
         exportStatus,
         phid,
@@ -579,6 +587,7 @@ export class SqliteDispatchReactor {
         status: 'done',
         resultJson,
         reportCandidateRequestJson,
+        promotionResultJson,
       });
     }
     return this.getByPhid(phid);
@@ -781,6 +790,7 @@ export class SqliteDispatchReactor {
           status: 'done';
           resultJson: string | null;
           reportCandidateRequestJson: string | null;
+          promotionResultJson: string | null;
         }
       | {
           status: 'failed' | 'cancelled';
@@ -792,10 +802,11 @@ export class SqliteDispatchReactor {
       status: SchedulerStatus;
       result_json: string | null;
       report_candidate_request_json: string | null;
+      promotion_result_json: string | null;
       failure_kind: FailureKind | null;
       failure_detail: string | null;
     }>(
-      `SELECT status, result_json, report_candidate_request_json, failure_kind, failure_detail
+      `SELECT status, result_json, report_candidate_request_json, promotion_result_json, failure_kind, failure_detail
          FROM dispatch_scheduler_queue
         WHERE dispatch_phid = ?`,
       [phid],
@@ -806,6 +817,7 @@ export class SqliteDispatchReactor {
       ? winner.status === 'done'
         && winner.result_json === expected.resultJson
         && winner.report_candidate_request_json === expected.reportCandidateRequestJson
+        && winner.promotion_result_json === expected.promotionResultJson
       : winner.status === expected.status
         && winner.failure_kind === expected.failureKind
         && winner.failure_detail === expected.failureDetail;
@@ -1649,6 +1661,7 @@ function rowToDoc(row: Row): DispatchDoc {
     promotion_strategy: (row.promotion_strategy ?? "auto") as DispatchDoc["promotion_strategy"],
     promotion_required_reason: row.promotion_required_reason ?? null,
     promotion_result: parseJsonOrNull(row.promotion_result_json),
+    promotion_result_json: row.promotion_result_json ?? null,
     artifact_path: row.artifact_path ?? null,
     // Recovery-state fields — tolerate legacy rows with null columns.
     recovery_status: (row.recovery_status ?? "none") as DispatchDoc["recovery_status"],

@@ -5498,28 +5498,6 @@ export class AgentManagerDb {
           }
         }
 
-        // Persist promotion result if supplied.
-        if (promotion) {
-          try {
-            await reactor.recordPromotionResult(doc.dispatch_phid, {
-              result: promotion,
-            });
-          } catch (err) {
-            const detail = err instanceof Error ? err.message : String(err);
-            this.managerLog(
-              `[agent-done] recordPromotionResult failed; refusing terminal transition: ${detail}`,
-            );
-            return res.status(503).json({
-              ok: false,
-              error: 'promotion_result_not_persisted',
-              detail,
-              dispatch_id: doc.dispatch_phid,
-              state: doc.status,
-              retryable: true,
-            });
-          }
-        }
-
         // Map structured failure metadata when success === false. Whitelist
         // the failure_kind so callers can't inject arbitrary strings.
         const ALLOWED_FAILURE_KINDS = new Set([
@@ -5558,6 +5536,7 @@ export class AgentManagerDb {
             report_candidate_request_json: reportPromotionRequest
               ? JSON.stringify(reportPromotionRequest)
               : null,
+            promotion_result_json: promotion ? JSON.stringify(promotion) : null,
           });
           if (!terminal || terminal.status === 'cancelled') {
             const error = new Error(
@@ -5603,6 +5582,40 @@ export class AgentManagerDb {
           });
         }
         const closeoutSuccess = terminal.status === 'done';
+
+        // Promotion evidence is committed as part of the exact terminal tuple.
+        // Hygiene routing happens only after that tuple wins (or reconciles
+        // exactly), and both writers deduplicate on stable incident identity.
+        if (closeoutSuccess && promotion) {
+          try {
+            const incident = classifyPromotionHygieneFailure({
+              repo: doc.promotion_input?.repo ?? null,
+              branch: doc.promotion_input?.branch ?? null,
+              dispatch_id: doc.dispatch_phid,
+              text: JSON.stringify({
+                failure_detail: typeof body.error === 'string' ? body.error : null,
+                promotion,
+              }),
+              payload: promotion,
+            });
+            if (incident) {
+              const loop = await getLoopRecord(this.db.adapter, 'worktree-hygiene');
+              if (loop) {
+                const nowIso = new Date().toISOString();
+                const run = buildPromotionHygieneRun(loop, incident, nowIso, {
+                  source: 'orchestration',
+                  actor: { kind: 'system', id: 'agent-done-promotion-hygiene', label: 'Agent Done Promotion Hygiene' },
+                });
+                await createLoopRun(this.db.adapter, run);
+                await upsertWorktreeHygieneCleanupRoute(this.db.adapter, incident, { nowIso });
+              }
+            }
+          } catch (err) {
+            this.managerLog(
+              `[agent-done] promotion hygiene loop routing failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
         let reportCandidateReceipt: ReportCandidateReceipt | null = null;
 
         // Fresh artifact delivery: /agent-done is the first reliable event that

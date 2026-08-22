@@ -591,6 +591,22 @@ describe("POST /agent-done — enforce mode", () => {
   it("build dispatch + complete valid promotion => 200, promotion persisted", async () => {
     const enq = await enqueue({ repo: "/abs/repo-ok", branch: "f4" });
     await claim(enq.dispatch_phid);
+    const promotion = {
+      required: true,
+      completed: true,
+      repos: [
+        {
+          path: "/abs/repo-ok",
+          base: "main",
+          source_branch: "f4",
+          strategy: "fast_forward",
+          promoted_sha: "abc123",
+          remote_main_sha: "abc123",
+          pushed: true,
+          verified: true,
+        },
+      ],
+    };
     const r = await fetch(`${baseUrl}/agent-done`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -598,22 +614,7 @@ describe("POST /agent-done — enforce mode", () => {
         dispatch_id: enq.dispatch_phid,
         success: true,
         mode: "enforce",
-        promotion: {
-          required: true,
-          completed: true,
-          repos: [
-            {
-              path: "/abs/repo-ok",
-              base: "main",
-              source_branch: "f4",
-              strategy: "fast_forward",
-              promoted_sha: "abc123",
-              remote_main_sha: "abc123",
-              pushed: true,
-              verified: true,
-            },
-          ],
-        },
+        promotion,
       }),
     });
     expect(r.status).toBe(200);
@@ -625,6 +626,32 @@ describe("POST /agent-done — enforce mode", () => {
     const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(enq.dispatch_phid);
     expect(doc.status).toBe("done");
     expect(doc.promotion_result).toMatchObject({ completed: true });
+
+    const exactRetry = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        mode: "enforce",
+        promotion,
+      }),
+    });
+    expect(exactRetry.status).toBe(200);
+
+    const changedRetry = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        mode: "enforce",
+        promotion: { ...promotion, retry_note: "different terminal evidence" },
+      }),
+    });
+    expect(changedRetry.status).toBe(409);
+    const settled = await (manager as any).dispatchScheduler.reactor.getByPhid(enq.dispatch_phid);
+    expect(settled.promotion_result).toEqual(promotion);
   });
 
   it("does not terminalize when promotion evidence persistence fails, then succeeds on retry", async () => {

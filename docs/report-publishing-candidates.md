@@ -17,7 +17,8 @@ erase the nomination.
 
 Terminal writes are database compare-and-set operations on both SQLite and
 PostgreSQL. The first success/failure/cancellation wins; an exact simultaneous
-or later retry recovers the winner, while a conflicting closeout is rejected
+or later retry recovers the winner, while a conflicting result, promotion
+record, or report candidate is rejected
 before artifact, inbox, query, or candidate projections and cannot overwrite
 the stored result or candidate. Classifier bounces return a bounced receipt and
 do not run success projections. Malformed durable outbox rows are quarantined

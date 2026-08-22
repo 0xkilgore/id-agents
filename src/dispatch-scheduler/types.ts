@@ -270,6 +270,8 @@ export interface DispatchDoc {
     | "follow_up_dispatch";
   promotion_required_reason: string | null;
   promotion_result: unknown | null;
+  /** Raw canonical promotion closeout used to reconcile exact /agent-done retries. */
+  promotion_result_json?: string | null;
   // Spec 056 ─ first-class artifact path sourced from
   // /agent-done.result.artifact_path. Null until the agent reports an
   // artifact at done-time. Additive; absent on legacy rows.

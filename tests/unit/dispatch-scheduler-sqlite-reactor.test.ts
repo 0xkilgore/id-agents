@@ -354,6 +354,29 @@ describe("SqliteDispatchReactor — round-trip parity with FakeReactor", () => {
     ]).toContainEqual(winner);
   });
 
+  it("binds promotion evidence into the simultaneous terminal winner", async () => {
+    const { client, reactor } = harness();
+    const enq = await client.enqueueDispatch({ ...base, query_id: "race-promotion-conflict" });
+    if (!enq.ok) throw new Error();
+    const phid = enq.value.dispatch_phid;
+    await client.claimForStart({ limit: 1 });
+    const result = { reply: "same" };
+    const attempts = await Promise.allSettled([
+      reactor.markDoneWithResult(phid, result, null, JSON.stringify({ completed: true, marker: "first" })),
+      reactor.markDoneWithResult(phid, result, null, JSON.stringify({ completed: true, marker: "second" })),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    const stored = await adapter.query<{ promotion_result_json: string | null }>(
+      `SELECT promotion_result_json FROM dispatch_scheduler_queue WHERE dispatch_phid = ?`,
+      [phid],
+    );
+    expect([
+      JSON.stringify({ completed: true, marker: "first" }),
+      JSON.stringify({ completed: true, marker: "second" }),
+    ]).toContain(stored.rows[0].promotion_result_json);
+  });
+
   it("never lets a simultaneous failure overwrite a successful candidate", async () => {
     const { client, reactor } = harness();
     const enq = await client.enqueueDispatch({ ...base, query_id: "race-success-failure" });

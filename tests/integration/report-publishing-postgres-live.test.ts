@@ -68,8 +68,10 @@ describe.skipIf(!connectionString)('report publishing on a live PostgreSQL datab
       enqueued.value.dispatch_phid,
       { reply: 'candidate' },
       JSON.stringify(request),
+      JSON.stringify({ completed: true, verified: true }),
     );
     expect(done?.status).toBe('done');
+    expect(done?.promotion_result).toEqual({ completed: true, verified: true });
 
     const flushed = await flushPendingReportCandidateOutbox(adapter, join(root, 'requests'));
     expect(flushed).toEqual({ attempted: 1, exported: 1, failed: 0 });
