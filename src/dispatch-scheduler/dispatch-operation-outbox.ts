@@ -1,4 +1,5 @@
 import type { SqliteAdapter } from "../db/sqlite-adapter.js";
+import type { DbAdapter } from "../db/db-adapter.js";
 
 export const DISPATCH_OUTBOX_SHADOW_FLAG = "DISPATCH_OUTBOX_SHADOW_ENABLED";
 
@@ -22,7 +23,7 @@ export interface DispatchOperationOutboxRow {
 
 /** Configure shadow emission. False is the rollback path; legacy rows remain authoritative. */
 export async function configureDispatchOperationOutbox(
-  adapter: SqliteAdapter,
+  adapter: DbAdapter,
   enabled = process.env[DISPATCH_OUTBOX_SHADOW_FLAG] === "1",
 ): Promise<void> {
   await adapter.query(

@@ -442,14 +442,14 @@ function normalizeAgentDoneResult(body: {
   ].filter((value): value is string => value !== null);
   if (new Set(artifactClaims).size > 1) throw new Error('AGENT_DONE_ARTIFACT_PATH_CONFLICT');
   const artifactPath = artifactClaims[0] ?? null;
-  const reportId =
+  const explicitReportId =
     normalizedStringField(source.report_id) ??
     normalizedStringField(source.reportId) ??
-    normalizedStringField(body.report_id) ??
-    (artifactPath ? artifactIdFromPath(artifactPath) : null);
+    normalizedStringField(body.report_id);
+  const reportId = explicitReportId ?? (artifactPath ? artifactIdFromPath(artifactPath) : null);
 
   if (artifactPath) source.artifact_path = artifactPath;
-  if (reportId) source.report_id = reportId;
+  if (explicitReportId) source.report_id = explicitReportId;
 
   return {
     result: Object.keys(source).length > 0 ? source : null,
@@ -5607,7 +5607,6 @@ export class AgentManagerDb {
                   actor: { kind: 'system', id: 'agent-done-promotion-hygiene', label: 'Agent Done Promotion Hygiene' },
                 });
                 await createLoopRun(this.db.adapter, run);
-                await upsertWorktreeHygieneCleanupRoute(this.db.adapter, incident, { nowIso });
               }
             }
           } catch (err) {

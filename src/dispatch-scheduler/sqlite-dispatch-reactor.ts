@@ -483,7 +483,7 @@ export class SqliteDispatchReactor {
     phid: string,
     result: Record<string, unknown> | null,
     reportCandidateRequestJson: string | null = null,
-    promotionResultJson: string | null = null,
+    promotionResultJson: string | null | undefined = undefined,
   ): Promise<DispatchDoc | null> {
     const doc = await this.getByPhid(phid);
     if (!doc) return null;
@@ -496,6 +496,9 @@ export class SqliteDispatchReactor {
         ? result.artifact_path
         : null;
     const resultJson = result ? JSON.stringify(result) : null;
+    const effectivePromotionResultJson = promotionResultJson === undefined
+      ? doc.promotion_result_json ?? null
+      : promotionResultJson;
     const exportStatus = reportCandidateRequestJson === null ? null : 'pending';
     const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
@@ -511,7 +514,7 @@ export class SqliteDispatchReactor {
         now,
         resultJson,
         artifactPath,
-        promotionResultJson,
+        effectivePromotionResultJson,
         reportCandidateRequestJson,
         exportStatus,
         phid,
@@ -522,7 +525,7 @@ export class SqliteDispatchReactor {
         status: 'done',
         resultJson,
         reportCandidateRequestJson,
-        promotionResultJson,
+        promotionResultJson: effectivePromotionResultJson,
       });
     }
     return this.getByPhid(phid);
@@ -546,7 +549,7 @@ export class SqliteDispatchReactor {
     phid: string,
     result: Record<string, unknown> | null,
     reportCandidateRequestJson: string | null = null,
-    promotionResultJson: string | null = null,
+    promotionResultJson: string | null | undefined = undefined,
   ): Promise<DispatchDoc | null> {
     const doc = await this.getByPhid(phid);
     if (!doc) return null;
@@ -561,6 +564,9 @@ export class SqliteDispatchReactor {
         ? result.artifact_path
         : null;
     const resultJson = result ? JSON.stringify(result) : null;
+    const effectivePromotionResultJson = promotionResultJson === undefined
+      ? doc.promotion_result_json ?? null
+      : promotionResultJson;
     const exportStatus = reportCandidateRequestJson === null ? null : 'pending';
     const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
@@ -576,7 +582,7 @@ export class SqliteDispatchReactor {
         now,
         resultJson,
         artifactPath,
-        promotionResultJson,
+        effectivePromotionResultJson,
         reportCandidateRequestJson,
         exportStatus,
         phid,
@@ -587,7 +593,7 @@ export class SqliteDispatchReactor {
         status: 'done',
         resultJson,
         reportCandidateRequestJson,
-        promotionResultJson,
+        promotionResultJson: effectivePromotionResultJson,
       });
     }
     return this.getByPhid(phid);

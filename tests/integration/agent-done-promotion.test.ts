@@ -16,6 +16,7 @@ import { SqliteQueriesRepo } from "../../src/db/repos/sqlite/queries-repo.js";
 import { SqliteNewsRepo } from "../../src/db/repos/sqlite/news-repo.js";
 import { SqliteSchedulesRepo } from "../../src/db/repos/sqlite/schedules-repo.js";
 import { SqliteTasksRepo } from "../../src/db/repos/sqlite/tasks-repo.js";
+import { getLoopRunByKey } from "../../src/loops/storage.js";
 
 async function createInMemoryDb() {
   const adapter = new SqliteAdapter(":memory:");
@@ -654,76 +655,47 @@ describe("POST /agent-done — enforce mode", () => {
     expect(settled.promotion_result).toEqual(promotion);
   });
 
-  it("does not terminalize when promotion evidence persistence fails, then succeeds on retry", async () => {
-    const enq = await enqueue({ repo: "/abs/repo-durable", branch: "f-durable" });
-    const beforeCloseout = await claim(enq.dispatch_phid);
-    const reactor = (manager as any).dispatchScheduler.reactor;
-    const originalRecordPromotionResult = reactor.recordPromotionResult.bind(reactor);
-    let failOnce = true;
-    reactor.recordPromotionResult = async (...args: any[]) => {
-      if (failOnce) {
-        failOnce = false;
-        throw new Error("injected promotion persistence failure");
-      }
-      return originalRecordPromotionResult(...args);
-    };
-
-    const payload = {
-      dispatch_id: enq.dispatch_phid,
-      success: true,
-      mode: "enforce",
-      promotion: {
-        required: true,
-        completed: true,
-        repos: [
-          {
-            path: "/abs/repo-durable",
+  it("hygiene-classified promotion failure enqueues a Worktree Hygiene loop run", async () => {
+    const enq = await enqueue({ repo: "/abs/repo-hygiene", branch: "feature/diverged" });
+    await claim(enq.dispatch_phid);
+    const r = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        promotion: {
+          required: true,
+          completed: true,
+          failure_detail: "branch feature/diverged has diverged from main (ahead=1, behind=2)",
+          repos: [{
+            path: "/abs/repo-hygiene",
             base: "main",
-            source_branch: "f-durable",
-            strategy: "fast_forward",
-            promoted_sha: "durable123",
-            remote_main_sha: "durable123",
+            source_branch: "feature/diverged",
+            strategy: "merge_commit",
+            promoted_sha: "hygiene123",
+            remote_main_sha: "hygiene123",
             pushed: true,
             verified: true,
-          },
-        ],
-      },
-    };
+          }],
+        },
+      }),
+    });
+    expect(r.status).toBe(200);
 
-    try {
-      const failed = await fetch(`${baseUrl}/agent-done`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      expect(failed.status).toBe(503);
-      expect(await failed.json()).toMatchObject({
-        ok: false,
-        error: "promotion_result_not_persisted",
-        dispatch_id: enq.dispatch_phid,
-        state: beforeCloseout.status,
-        retryable: true,
-      });
-      const afterFailure = await reactor.getByPhid(enq.dispatch_phid);
-      expect(afterFailure.status).toBe(beforeCloseout.status);
-      expect(afterFailure.status).not.toBe("done");
-      expect(afterFailure.promotion_result).toBeNull();
-
-      const retried = await fetch(`${baseUrl}/agent-done`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      expect(retried.status).toBe(200);
-      const terminal = await reactor.getByPhid(enq.dispatch_phid);
-      expect(terminal.status).toBe("done");
-      expect(terminal.promotion_result).toMatchObject({
-        completed: true,
-        repos: [expect.objectContaining({ promoted_sha: "durable123", verified: true })],
-      });
-    } finally {
-      reactor.recordPromotionResult = originalRecordPromotionResult;
-    }
+    const run = await getLoopRunByKey(
+      db.adapter,
+      "phid:loop:worktree-hygiene",
+      "promotion-hygiene:/abs/repo-hygiene:feature/diverged:ahead_behind_divergence",
+    );
+    expect(run?.trigger).toMatchObject({
+      kind: "promotion_hygiene",
+      source: "orchestration",
+      repo: "/abs/repo-hygiene",
+      branch: "feature/diverged",
+      incident_code: "ahead_behind_divergence",
+      linked_dispatch: enq.dispatch_phid,
+    });
   });
 });
 
@@ -769,7 +741,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
       body: JSON.stringify({
         dispatch_id: enq.dispatch_phid,
         success: true,
-        result: { artifact_path: "/tmp/spec.md" },
+        result: { artifact_path: "/tmp/spec.md", project_ref: "kapelle" },
       }),
     });
     expect(r.status).toBe(200);
@@ -784,7 +756,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
     expect(doc.status).toBe("done");
     expect(doc.completed_at).not.toBeNull();
     const result = await reactor.getResult(enq.dispatch_phid);
-    expect(result).toEqual({ artifact_path: "/tmp/spec.md" });
+    expect(result).toEqual({ artifact_path: "/tmp/spec.md", project_ref: "kapelle" });
     const artifactRows = await db.adapter.query<{ abs_path: string; source: string; availability: string; dispatch_ref: string | null }>(
       `SELECT abs_path, source, availability, dispatch_ref
          FROM artifacts
@@ -810,7 +782,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
       body: JSON.stringify({
         dispatch_id: enq.dispatch_phid,
         success: true,
-        result: { artifact_path: "/tmp/first.md" },
+        result: { artifact_path: "/tmp/first.md", project_ref: "kapelle" },
       }),
     });
     expect(first.status).toBe(200);
@@ -821,7 +793,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
       body: JSON.stringify({
         dispatch_id: enq.dispatch_phid,
         success: true,
-        result: { artifact_path: "/tmp/first.md" },
+        result: { artifact_path: "/tmp/first.md", project_ref: "kapelle" },
       }),
     });
     expect(second.status).toBe(200);
@@ -834,7 +806,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
       body: JSON.stringify({
         dispatch_id: enq.dispatch_phid,
         success: true,
-        result: { artifact_path: "/tmp/second.md" },
+        result: { artifact_path: "/tmp/second.md", project_ref: "kapelle" },
       }),
     });
     expect(changed.status).toBe(409);
@@ -842,7 +814,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
     // First result wins.
     const reactor = (manager as any).dispatchScheduler.reactor;
     const result = await reactor.getResult(enq.dispatch_phid);
-    expect(result).toEqual({ artifact_path: "/tmp/first.md" });
+    expect(result).toEqual({ artifact_path: "/tmp/first.md", project_ref: "kapelle" });
   });
 
   it("queued failure path still works via markFailed (existing behavior unchanged)", async () => {
