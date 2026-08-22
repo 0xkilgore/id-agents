@@ -864,6 +864,7 @@ export class SchedulerHandle {
     query_id?: string;
     agent_query_id?: string;
     result?: Record<string, unknown> | null;
+    report_candidate_request_json?: string | null;
     success?: boolean;
     error?: string;
     // Harness-resilience (Spec 2026-05-29): structured failure kind from
@@ -996,9 +997,14 @@ export class SchedulerHandle {
       return this.reactor.markQueuedDoneWithResult(
         doc.dispatch_phid,
         args.result ?? null,
+        args.report_candidate_request_json ?? null,
       );
     }
-    return this.reactor.markDoneWithResult(doc.dispatch_phid, args.result ?? null);
+    return this.reactor.markDoneWithResult(
+      doc.dispatch_phid,
+      args.result ?? null,
+      args.report_candidate_request_json ?? null,
+    );
   }
 
   private resolveFallbackLaneForProviderLimit(doc: DispatchDoc): { provider: Provider; runtime: Runtime } | null {

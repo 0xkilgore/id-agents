@@ -13,13 +13,15 @@ import {
   fsyncSync,
   fstatSync,
   linkSync,
+  readdirSync,
 } from 'node:fs';
-import { extname, isAbsolute, join, resolve } from 'node:path';
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 export const REPORT_CANDIDATE_SCHEMA_VERSION = 'report-candidate.v1' as const;
-export const REPORT_PROMOTION_REQUEST_SCHEMA_VERSION = 'report-promotion-request.v1' as const;
+export const REPORT_PROMOTION_REQUEST_SCHEMA_VERSION = 'report-promotion-request.v2' as const;
 
 const MAX_REQUEST_BYTES = 64 * 1024;
+const MAX_MARKDOWN_BYTES = 256 * 1024;
 const MAX_TITLE_LENGTH = 500;
 const MAX_REF_LENGTH = 1_000;
 const MAX_REASON_LENGTH = 2_000;
@@ -49,10 +51,12 @@ export type ReportPromotionRequest = {
   title: string;
   reportRef: string;
   sourceRef: string;
+  expectedContentHash: string;
+  expectedByteSize: number;
   projectRef?: string | null;
   familyRef?: string | null;
   producer: {
-    kind: 'AGENT';
+    kind: 'SERVICE';
     id: string;
     label: string;
   };
@@ -71,14 +75,22 @@ export type ReportCandidateReceipt = {
   status: 'recorded' | 'already_recorded' | 'not_configured' | 'conflict' | 'write_failed';
   candidate_id: string;
   report_ref: string;
-  request_path: string | null;
   error: 'REPORT_PROMOTION_REQUEST_DIR_NOT_CONFIGURED' | 'REPORT_CANDIDATE_CONFLICT' | 'REPORT_CANDIDATE_WRITE_FAILED' | null;
+};
+
+export type ReportCandidateWriteResult = ReportCandidateReceipt & {
+  requestPath: string | null;
+};
+
+export type AdmittedReportCandidateArtifact = {
+  contentPath: string;
+  contentHash: string;
+  byteSize: number;
 };
 
 type CandidateContext = {
   dispatchId: string;
-  artifactPath: string;
-  agentId: string;
+  artifact: AdmittedReportCandidateArtifact;
   defaultTitle: string;
   occurredAt: string;
 };
@@ -123,12 +135,12 @@ export function parseAgentReportCandidate(value: unknown): AgentReportCandidate 
 export function buildReportPromotionRequest(candidateValue: unknown, context: CandidateContext): ReportPromotionRequest {
   const candidate = parseAgentReportCandidate(candidateValue);
   const dispatchId = trustedText(context.dispatchId, 'dispatchId', 500);
-  const artifactPath = trustedText(context.artifactPath, 'artifactPath', 4_000);
-  if (!isAbsolute(artifactPath)) throw new Error('REPORT_CANDIDATE_ARTIFACT_PATH_NOT_ABSOLUTE');
-  if (!['.md', '.markdown'].includes(extname(artifactPath).toLowerCase())) {
-    throw new Error('REPORT_CANDIDATE_ARTIFACT_TYPE_UNSUPPORTED');
+  const artifactPath = trustedText(context.artifact.contentPath, 'artifactPath', 4_000);
+  const contentHash = trustedContentHash(context.artifact.contentHash);
+  const byteSize = context.artifact.byteSize;
+  if (!Number.isSafeInteger(byteSize) || byteSize < 1 || byteSize > MAX_MARKDOWN_BYTES) {
+    throw new Error('REPORT_CANDIDATE_ARTIFACT_SIZE_INVALID');
   }
-  const agentId = trustedText(context.agentId, 'agentId', 500);
   const occurredAt = strictIso(context.occurredAt, 'occurredAt');
   const title = candidate.title ?? trustedText(context.defaultTitle, 'defaultTitle', MAX_TITLE_LENGTH);
   const reportRef = candidate.report_ref ?? stableRef(`report:dispatch:${dispatchId}`, 'reportRef', MAX_REF_LENGTH);
@@ -140,9 +152,14 @@ export function buildReportPromotionRequest(candidateValue: unknown, context: Ca
     title,
     reportRef,
     sourceRef,
+    expectedContentHash: contentHash,
+    expectedByteSize: byteSize,
     ...(candidate.project_ref === undefined ? {} : { projectRef: candidate.project_ref }),
     ...(candidate.family_ref === undefined ? {} : { familyRef: candidate.family_ref }),
-    producer: { kind: 'AGENT', id: agentId, label: agentId },
+    // Until /agent-done has a per-agent authenticated principal, the honest
+    // producer is the authenticated Manager service. The dispatch sourceRef
+    // preserves provenance without falsely claiming agent authorship.
+    producer: { kind: 'SERVICE', id: 'agent-manager', label: 'Agent Manager' },
     attention: {
       request: candidate.attention.request,
       ...(candidate.attention.reason_code === undefined ? {} : { reasonCode: candidate.attention.reason_code }),
@@ -154,10 +171,93 @@ export function buildReportPromotionRequest(candidateValue: unknown, context: Ca
   };
 }
 
+export function admitReportCandidateArtifact(
+  contentPathValue: unknown,
+  allowedRootValue: string | undefined,
+): AdmittedReportCandidateArtifact {
+  const contentPath = trustedText(contentPathValue, 'artifactPath', 4_000);
+  const allowedRoot = allowedRootValue?.trim();
+  if (!allowedRoot) throw new Error('REPORT_CANDIDATE_ALLOWED_ROOT_NOT_CONFIGURED');
+  if (!isAbsolute(contentPath)) throw new Error('REPORT_CANDIDATE_ARTIFACT_PATH_NOT_ABSOLUTE');
+  if (!isAbsolute(allowedRoot)) throw new Error('REPORT_CANDIDATE_ALLOWED_ROOT_INVALID');
+
+  let canonicalRoot: string;
+  let canonicalContent: string;
+  try {
+    canonicalRoot = realpathSync.native(resolve(allowedRoot));
+    canonicalContent = realpathSync.native(contentPath);
+  } catch {
+    throw new Error('REPORT_CANDIDATE_ARTIFACT_INVALID');
+  }
+  if (canonicalRoot !== resolve(allowedRoot)) throw new Error('REPORT_CANDIDATE_ALLOWED_ROOT_NOT_CANONICAL');
+  if (canonicalContent !== contentPath) throw new Error('REPORT_CANDIDATE_ARTIFACT_PATH_NOT_CANONICAL');
+  const fromRoot = relative(canonicalRoot, canonicalContent);
+  if (fromRoot === '' || fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    throw new Error('REPORT_CANDIDATE_ARTIFACT_OUTSIDE_ALLOWED_ROOT');
+  }
+  if (!['.md', '.markdown'].includes(extname(canonicalContent).toLowerCase())) {
+    throw new Error('REPORT_CANDIDATE_ARTIFACT_TYPE_UNSUPPORTED');
+  }
+
+  const rootStat = lstatSync(canonicalRoot, { bigint: true });
+  const pathStat = lstatSync(canonicalContent, { bigint: true });
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('REPORT_CANDIDATE_ALLOWED_ROOT_INVALID');
+  if (pathStat.isSymbolicLink() || !pathStat.isFile() || pathStat.nlink !== 1n) {
+    throw new Error('REPORT_CANDIDATE_ARTIFACT_NOT_SAFE_REGULAR_FILE');
+  }
+  if (pathStat.size < 1n) throw new Error('REPORT_CANDIDATE_ARTIFACT_EMPTY');
+  if (pathStat.size > BigInt(MAX_MARKDOWN_BYTES)) throw new Error('REPORT_CANDIDATE_ARTIFACT_TOO_LARGE');
+
+  const descriptor = openSync(canonicalContent, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = fstatSync(descriptor, { bigint: true });
+    if (
+      !before.isFile()
+      || before.nlink !== 1n
+      || before.dev !== pathStat.dev
+      || before.ino !== pathStat.ino
+    ) {
+      throw new Error('REPORT_CANDIDATE_ARTIFACT_IDENTITY_CHANGED');
+    }
+    const bytes = readFileSync(descriptor);
+    const after = fstatSync(descriptor, { bigint: true });
+    if (
+      after.dev !== before.dev
+      || after.ino !== before.ino
+      || after.size !== before.size
+      || after.mtimeNs !== before.mtimeNs
+      || after.ctimeNs !== before.ctimeNs
+      || bytes.byteLength !== Number(before.size)
+    ) {
+      throw new Error('REPORT_CANDIDATE_ARTIFACT_CHANGED_DURING_READ');
+    }
+    const rootAfter = lstatSync(canonicalRoot, { bigint: true });
+    const pathAfter = lstatSync(canonicalContent, { bigint: true });
+    if (
+      rootAfter.dev !== rootStat.dev
+      || rootAfter.ino !== rootStat.ino
+      || pathAfter.dev !== before.dev
+      || pathAfter.ino !== before.ino
+      || !pathAfter.isFile()
+      || pathAfter.nlink !== 1n
+    ) {
+      throw new Error('REPORT_CANDIDATE_ARTIFACT_IDENTITY_CHANGED');
+    }
+    decodeUtf8(bytes, 'REPORT_CANDIDATE_ARTIFACT_ENCODING_INVALID');
+    return {
+      contentPath: canonicalContent,
+      contentHash: createHash('sha256').update(bytes).digest('hex'),
+      byteSize: bytes.byteLength,
+    };
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 export function recordReportPromotionRequest(
   request: ReportPromotionRequest,
   configuredDirectory: string | undefined,
-): ReportCandidateReceipt {
+): ReportCandidateWriteResult {
   const candidateId = createHash('sha256').update(request.sourceRef).digest('hex').slice(0, 24);
   const base = {
     schema_version: 'report-candidate-receipt.v1' as const,
@@ -166,7 +266,7 @@ export function recordReportPromotionRequest(
   };
   const trimmed = configuredDirectory?.trim();
   if (!trimmed) {
-    return { ...base, status: 'not_configured', request_path: null, error: 'REPORT_PROMOTION_REQUEST_DIR_NOT_CONFIGURED' };
+    return { ...base, status: 'not_configured', requestPath: null, error: 'REPORT_PROMOTION_REQUEST_DIR_NOT_CONFIGURED' };
   }
 
   try {
@@ -178,8 +278,8 @@ export function recordReportPromotionRequest(
     if (existsSync(requestPath)) {
       const existing = readBoundedRequest(requestPath);
       return existing === serialized
-        ? { ...base, status: 'already_recorded', request_path: requestPath, error: null }
-        : { ...base, status: 'conflict', request_path: requestPath, error: 'REPORT_CANDIDATE_CONFLICT' };
+        ? { ...base, status: 'already_recorded', requestPath, error: null }
+        : { ...base, status: 'conflict', requestPath, error: 'REPORT_CANDIDATE_CONFLICT' };
     }
 
     const temporaryPath = join(directory, `.${candidateId}.${randomUUID()}.tmp`);
@@ -196,16 +296,21 @@ export function recordReportPromotionRequest(
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         const existing = readBoundedRequest(requestPath);
         return existing === serialized
-          ? { ...base, status: 'already_recorded', request_path: requestPath, error: null }
-          : { ...base, status: 'conflict', request_path: requestPath, error: 'REPORT_CANDIDATE_CONFLICT' };
+          ? { ...base, status: 'already_recorded', requestPath, error: null }
+          : { ...base, status: 'conflict', requestPath, error: 'REPORT_CANDIDATE_CONFLICT' };
       }
     } finally {
       if (descriptor !== undefined) closeSync(descriptor);
-      try { unlinkSync(temporaryPath); } catch { /* already removed or never created */ }
+      try {
+        unlinkSync(temporaryPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
     }
-    return { ...base, status: 'recorded', request_path: requestPath, error: null };
+    fsyncDirectory(directory);
+    return { ...base, status: 'recorded', requestPath, error: null };
   } catch {
-    return { ...base, status: 'write_failed', request_path: null, error: 'REPORT_CANDIDATE_WRITE_FAILED' };
+    return { ...base, status: 'write_failed', requestPath: null, error: 'REPORT_CANDIDATE_WRITE_FAILED' };
   }
 }
 
@@ -225,10 +330,21 @@ function secureDirectory(configured: string): string {
 
 function readBoundedRequest(path: string): string {
   const stat = lstatSync(path, { bigint: true });
+  const directory = resolve(path, '..');
+  const candidateId = basename(path, '.json');
+  const transientPublicationLink = stat.nlink === 2n && readdirSync(directory).some((name) => {
+    if (!name.startsWith(`.${candidateId}.`) || !name.endsWith('.tmp')) return false;
+    try {
+      const sibling = lstatSync(join(directory, name), { bigint: true });
+      return sibling.isFile() && !sibling.isSymbolicLink() && sibling.dev === stat.dev && sibling.ino === stat.ino;
+    } catch {
+      return false;
+    }
+  });
   if (
     !stat.isFile()
     || stat.isSymbolicLink()
-    || stat.nlink !== 1n
+    || (stat.nlink !== 1n && !transientPublicationLink)
     || stat.size < 1n
     || stat.size > BigInt(MAX_REQUEST_BYTES)
     || (stat.mode & 0o077n) !== 0n
@@ -239,7 +355,7 @@ function readBoundedRequest(path: string): string {
   const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const before = fstatSync(descriptor, { bigint: true });
-    if (!before.isFile() || before.dev !== stat.dev || before.ino !== stat.ino || before.nlink !== 1n) {
+    if (!before.isFile() || before.dev !== stat.dev || before.ino !== stat.ino || (before.nlink !== 1n && !transientPublicationLink)) {
       throw new Error('REPORT_CANDIDATE_EXISTING_REQUEST_CHANGED');
     }
     const bytes = readFileSync(descriptor);
@@ -262,6 +378,15 @@ function readBoundedRequest(path: string): string {
       throw new Error('REPORT_CANDIDATE_EXISTING_REQUEST_CHANGED');
     }
     return contents;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function fsyncDirectory(directory: string): void {
+  const descriptor = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    fsyncSync(descriptor);
   } finally {
     closeSync(descriptor);
   }
@@ -294,6 +419,24 @@ function trustedText(value: unknown, field: string, max: number): string {
     throw new Error(`REPORT_CANDIDATE_${field.toUpperCase().replaceAll('.', '_')}_INVALID`);
   }
   return value;
+}
+
+function trustedContentHash(value: unknown): string {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new Error('REPORT_CANDIDATE_ARTIFACT_HASH_INVALID');
+  }
+  return value;
+}
+
+function decodeUtf8(bytes: Buffer, errorCode: string): string {
+  let decoded: string;
+  try {
+    decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error(errorCode);
+  }
+  if (!Buffer.from(decoded, 'utf8').equals(bytes) || decoded.trim().length === 0) throw new Error(errorCode);
+  return decoded;
 }
 
 function stableRef(value: unknown, field: string, max: number): string {

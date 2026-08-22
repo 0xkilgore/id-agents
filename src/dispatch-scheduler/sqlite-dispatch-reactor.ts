@@ -473,6 +473,7 @@ export class SqliteDispatchReactor {
   async markDoneWithResult(
     phid: string,
     result: Record<string, unknown> | null,
+    reportCandidateRequestJson: string | null = null,
   ): Promise<DispatchDoc | null> {
     const doc = await this.getByPhid(phid);
     if (!doc) return null;
@@ -486,9 +487,21 @@ export class SqliteDispatchReactor {
         : null;
     await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
-       SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?
+       SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?,
+           report_candidate_request_json = ?,
+           report_candidate_export_status = CASE WHEN ? IS NULL THEN NULL ELSE 'pending' END,
+           report_candidate_export_attempted_at = NULL,
+           report_candidate_export_error = NULL
        WHERE dispatch_phid = ?`,
-      [now, now, result ? JSON.stringify(result) : null, artifactPath, phid],
+      [
+        now,
+        now,
+        result ? JSON.stringify(result) : null,
+        artifactPath,
+        reportCandidateRequestJson,
+        reportCandidateRequestJson,
+        phid,
+      ],
     );
     return this.getByPhid(phid);
   }
@@ -510,6 +523,7 @@ export class SqliteDispatchReactor {
   async markQueuedDoneWithResult(
     phid: string,
     result: Record<string, unknown> | null,
+    reportCandidateRequestJson: string | null = null,
   ): Promise<DispatchDoc | null> {
     const doc = await this.getByPhid(phid);
     if (!doc) return null;
@@ -525,9 +539,21 @@ export class SqliteDispatchReactor {
         : null;
     await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
-       SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?
+       SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?,
+           report_candidate_request_json = ?,
+           report_candidate_export_status = CASE WHEN ? IS NULL THEN NULL ELSE 'pending' END,
+           report_candidate_export_attempted_at = NULL,
+           report_candidate_export_error = NULL
        WHERE dispatch_phid = ? AND status = 'queued'`,
-      [now, now, result ? JSON.stringify(result) : null, artifactPath, phid],
+      [
+        now,
+        now,
+        result ? JSON.stringify(result) : null,
+        artifactPath,
+        reportCandidateRequestJson,
+        reportCandidateRequestJson,
+        phid,
+      ],
     );
     return this.getByPhid(phid);
   }

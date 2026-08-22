@@ -84,11 +84,16 @@ import {
 } from './lib/agent-done-auth.js';
 import { artifactIdFromPath, migrateOutputsTables, registerArtifactPathDelivery } from './outputs/storage.js';
 import {
+  admitReportCandidateArtifact,
   buildReportPromotionRequest,
-  recordReportPromotionRequest,
   type ReportCandidateReceipt,
   type ReportPromotionRequest,
 } from './report-publishing/candidate.js';
+import {
+  exportReportCandidateOutboxEntry,
+  flushPendingReportCandidateOutbox,
+  loadStoredReportPromotionRequest,
+} from './report-publishing/outbox.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
@@ -430,10 +435,13 @@ function normalizeAgentDoneResult(body: {
     body.result && typeof body.result === 'object' && !Array.isArray(body.result)
       ? { ...(body.result as Record<string, unknown>) }
       : {};
-  const artifactPath =
-    normalizedStringField(source.artifact_path) ??
-    normalizedStringField(source.artifactPath) ??
-    normalizedStringField(body.artifact_path);
+  const artifactClaims = [
+    normalizedStringField(source.artifact_path),
+    normalizedStringField(source.artifactPath),
+    normalizedStringField(body.artifact_path),
+  ].filter((value): value is string => value !== null);
+  if (new Set(artifactClaims).size > 1) throw new Error('AGENT_DONE_ARTIFACT_PATH_CONFLICT');
+  const artifactPath = artifactClaims[0] ?? null;
   const reportId =
     normalizedStringField(source.report_id) ??
     normalizedStringField(source.reportId) ??
@@ -1313,6 +1321,7 @@ export class AgentManagerDb {
   private taskCommentSweepInterval: NodeJS.Timeout | null = null;
   private filesystemArtifactReconcileInterval: NodeJS.Timeout | null = null;
   private worktreeReaperInterval: NodeJS.Timeout | null = null;
+  private reportCandidateOutboxInterval: NodeJS.Timeout | null = null;
   private retentionService: RetentionService | null = null;
   private checkinService: CheckinService | null = null;
   private supervisorWatcher: { stop(): void; getHealthStatus?(nowMs?: number): SupervisorHealthStatus } | null = null;
@@ -2818,6 +2827,35 @@ export class AgentManagerDb {
     runFull();
     this.filesystemArtifactReconcileInterval = setInterval(runFull, intervalMs);
     this.filesystemArtifactReconcileInterval.unref?.();
+  }
+
+  private startReportCandidateOutbox(): void {
+    if (this.reportCandidateOutboxInterval || this.db.adapter.dialect !== 'sqlite') return;
+    const run = async () => {
+      try {
+        const requestDirectory = process.env.REPORT_PROMOTION_REQUEST_DIR;
+        // Keep a not-configured entry durable without rewriting the same
+        // failure timestamp every 30 seconds. A configured restart flushes it.
+        if (!requestDirectory?.trim()) return;
+        const result = await flushPendingReportCandidateOutbox(
+          this.db.adapter,
+          requestDirectory,
+        );
+        if (result.exported > 0 || result.failed > 0) {
+          this.managerLog(
+            `[report-candidate-outbox] attempted=${result.attempted} exported=${result.exported} failed=${result.failed}`,
+          );
+        }
+      } catch (err) {
+        this.managerLog(
+          `[report-candidate-outbox] flush failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+    void run();
+    const intervalMs = Number(process.env.REPORT_CANDIDATE_OUTBOX_INTERVAL_MS || 30_000);
+    this.reportCandidateOutboxInterval = setInterval(() => { void run(); }, intervalMs);
+    this.reportCandidateOutboxInterval.unref?.();
   }
 
   // P0 worktree-explosion guard: periodically reap merged + tracked-clean build
@@ -5312,7 +5350,15 @@ export class AgentManagerDb {
             : null;
 
         const success = body.success !== false;
-        const normalizedResult = normalizeAgentDoneResult(body);
+        let normalizedResult: NormalizedAgentDoneResult;
+        try {
+          normalizedResult = normalizeAgentDoneResult(body);
+        } catch (err) {
+          if (err instanceof Error && err.message === 'AGENT_DONE_ARTIFACT_PATH_CONFLICT') {
+            return res.status(400).json({ ok: false, error: err.message });
+          }
+          throw err;
+        }
         let reportPromotionRequest: ReportPromotionRequest | null = null;
         if (body.report_candidate !== undefined) {
           if (!success) {
@@ -5329,10 +5375,13 @@ export class AgentManagerDb {
                 ? resultProjection.tl_dr.trim()
                 : doc.subject;
           try {
+            const admittedArtifact = admitReportCandidateArtifact(
+              normalizedResult.artifact_path,
+              process.env.REPORT_PROMOTION_ALLOWED_ROOT,
+            );
             reportPromotionRequest = buildReportPromotionRequest(body.report_candidate, {
               dispatchId: doc.dispatch_phid,
-              artifactPath: normalizedResult.artifact_path,
-              agentId: doc.to_agent,
+              artifact: admittedArtifact,
               defaultTitle,
               occurredAt: doc.not_before_at,
             });
@@ -5340,7 +5389,8 @@ export class AgentManagerDb {
             const code = err instanceof Error && /^REPORT_CANDIDATE_[A-Z0-9_]+$/.test(err.message)
               ? err.message
               : 'REPORT_CANDIDATE_INVALID';
-            return res.status(400).json({ ok: false, error: code });
+            const status = code === 'REPORT_CANDIDATE_ALLOWED_ROOT_NOT_CONFIGURED' ? 503 : 400;
+            return res.status(status).json({ ok: false, error: code });
           }
         }
 
@@ -5502,6 +5552,9 @@ export class AgentManagerDb {
             success,
             failure_kind: failureKind,
             error: errorDetail,
+            report_candidate_request_json: reportPromotionRequest
+              ? JSON.stringify(reportPromotionRequest)
+              : null,
           });
           if (this.db.events && terminalDoc) {
             const eventTeamId = await this.db.queries.findTeam(terminalDoc.query_id)
@@ -5597,14 +5650,27 @@ export class AgentManagerDb {
           }
         }
 
-        // The dispatch completion remains authoritative even when the
-        // filesystem handoff projection cannot be written.
+        // The candidate request was durably committed on the dispatch row by
+        // the same terminal UPDATE above. This filesystem write is only an
+        // export projection; a crash here is repaired by the outbox flusher.
         if (reportPromotionRequest) {
-          reportCandidateReceipt = recordReportPromotionRequest(
-            reportPromotionRequest,
-            process.env.REPORT_PROMOTION_REQUEST_DIR,
-          );
-          if (reportCandidateReceipt.status === 'write_failed' || reportCandidateReceipt.status === 'conflict') {
+          const stored = await loadStoredReportPromotionRequest(this.db.adapter, doc.dispatch_phid);
+          if (!stored || JSON.stringify(stored) !== JSON.stringify(reportPromotionRequest)) {
+            reportCandidateReceipt = {
+              schema_version: 'report-candidate-receipt.v1',
+              status: 'conflict',
+              candidate_id: crypto.createHash('sha256').update(stored?.sourceRef ?? reportPromotionRequest.sourceRef).digest('hex').slice(0, 24),
+              report_ref: stored?.reportRef ?? reportPromotionRequest.reportRef,
+              error: 'REPORT_CANDIDATE_CONFLICT',
+            };
+          } else {
+            reportCandidateReceipt = await exportReportCandidateOutboxEntry(
+              this.db.adapter,
+              doc.dispatch_phid,
+              process.env.REPORT_PROMOTION_REQUEST_DIR,
+            );
+          }
+          if (reportCandidateReceipt && (reportCandidateReceipt.status === 'write_failed' || reportCandidateReceipt.status === 'conflict')) {
             this.managerLog(
               `[agent-done] report candidate ${reportCandidateReceipt.status} for ${doc.dispatch_phid}`,
             );
@@ -14334,6 +14400,7 @@ export class AgentManagerDb {
               },
             });
             this.dispatchScheduler.start();
+            this.startReportCandidateOutbox();
             // RD-014 (3rd attempt — Fable critique confirmed this was still
             // unwired 07-04/07-05/07-06): the enqueue-time admission gate
             // (providersConstrainedByRoutingHealth, folded in via
@@ -15126,6 +15193,10 @@ export class AgentManagerDb {
     if (this.remoteProbeInterval) {
       clearInterval(this.remoteProbeInterval);
       this.remoteProbeInterval = null;
+    }
+    if (this.reportCandidateOutboxInterval) {
+      clearInterval(this.reportCandidateOutboxInterval);
+      this.reportCandidateOutboxInterval = null;
     }
     if (this.wss) {
       try { this.wss.close(); } catch { /* swallow */ }

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "report-promotion-request.v2",
+  "contentPath": "/srv/id-agents/output/cleveland-park-decision.md",
+  "title": "Cleveland Park decision",
+  "reportRef": "report:dispatch:phid:dispatch:abc-123",
+  "sourceRef": "kapelle-dispatch://phid%3Adispatch%3Aabc-123",
+  "expectedContentHash": "3c7ebdf0e0a70ae53cdba8d15ed9a2cee7ee1c43262e8895ad7af4c2059f9e57",
+  "expectedByteSize": 26,
+  "projectRef": "project:cleveland-park",
+  "producer": {
+    "kind": "SERVICE",
+    "id": "agent-manager",
+    "label": "Agent Manager"
+  },
+  "attention": {
+    "request": "DECIDE",
+    "reasonCode": "operator_decision",
+    "reason": "Choose the bounded path."
+  },
+  "occurredAt": "2026-08-21T15:00:00.000Z"
+}

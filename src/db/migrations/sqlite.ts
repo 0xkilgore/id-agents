@@ -1064,6 +1064,13 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     // Spec 056 ─ first-class artifact path sourced from
     // /agent-done.result.artifact_path. Null until done-time.
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN artifact_path TEXT`,
+    // Report Publishing Pipeline v1: the canonical request is committed in the
+    // same terminal UPDATE as the dispatch. Filesystem export is a retryable
+    // projection of this durable outbox, never the sole nomination record.
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN report_candidate_request_json TEXT`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN report_candidate_export_status TEXT`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN report_candidate_export_attempted_at TEXT`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN report_candidate_export_error TEXT`,
     // Recovery-state columns. Additive, default-safe; NOT NULL columns
     // carry a DEFAULT so sqlite ADD COLUMN accepts them on existing rows.
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN recovery_status TEXT DEFAULT 'none'`,
