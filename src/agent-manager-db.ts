@@ -82,7 +82,13 @@ import {
   agentDoneAuthConfigFromEnv,
   authenticateAgentDone,
 } from './lib/agent-done-auth.js';
-import { migrateOutputsTables, registerArtifactPathDelivery } from './outputs/storage.js';
+import { artifactIdFromPath, migrateOutputsTables, registerArtifactPathDelivery } from './outputs/storage.js';
+import {
+  buildReportPromotionRequest,
+  recordReportPromotionRequest,
+  type ReportCandidateReceipt,
+  type ReportPromotionRequest,
+} from './report-publishing/candidate.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
@@ -403,6 +409,45 @@ function dispatchAttemptVisibleStatus(input: {
 
 function attemptStringField(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+type NormalizedAgentDoneResult = {
+  result: Record<string, unknown> | null;
+  artifact_path: string | null;
+  report_id: string | null;
+};
+
+function normalizedStringField(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeAgentDoneResult(body: {
+  result?: unknown;
+  artifact_path?: unknown;
+  report_id?: unknown;
+}): NormalizedAgentDoneResult {
+  const source =
+    body.result && typeof body.result === 'object' && !Array.isArray(body.result)
+      ? { ...(body.result as Record<string, unknown>) }
+      : {};
+  const artifactPath =
+    normalizedStringField(source.artifact_path) ??
+    normalizedStringField(source.artifactPath) ??
+    normalizedStringField(body.artifact_path);
+  const reportId =
+    normalizedStringField(source.report_id) ??
+    normalizedStringField(source.reportId) ??
+    normalizedStringField(body.report_id) ??
+    (artifactPath ? artifactIdFromPath(artifactPath) : null);
+
+  if (artifactPath) source.artifact_path = artifactPath;
+  if (reportId) source.report_id = reportId;
+
+  return {
+    result: Object.keys(source).length > 0 ? source : null,
+    artifact_path: artifactPath,
+    report_id: reportId,
+  };
 }
 
 type FleetMetricsHistoryRange = FleetMetricsHistoryResponse["range"];
@@ -5180,6 +5225,10 @@ export class AgentManagerDb {
           agent?: unknown;
           // Verify-on-done gate: the deliverable the agent claims it produced.
           artifact_path?: unknown;
+          report_id?: unknown;
+          // Optional, metadata-only nomination. The manager derives trusted
+          // artifact and dispatch fields and emits a publisher request.
+          report_candidate?: unknown;
           // Harness-resilience (Spec 2026-05-29): structured terminal
           // failure on success:false. failure_kind must be one of the
           // canonical FailureKind values; error is a short prose detail.
@@ -5263,6 +5312,37 @@ export class AgentManagerDb {
             : null;
 
         const success = body.success !== false;
+        const normalizedResult = normalizeAgentDoneResult(body);
+        let reportPromotionRequest: ReportPromotionRequest | null = null;
+        if (body.report_candidate !== undefined) {
+          if (!success) {
+            return res.status(400).json({ ok: false, error: 'REPORT_CANDIDATE_REQUIRES_SUCCESS' });
+          }
+          if (!normalizedResult.artifact_path) {
+            return res.status(400).json({ ok: false, error: 'REPORT_CANDIDATE_ARTIFACT_REQUIRED' });
+          }
+          const resultProjection = normalizedResult.result;
+          const defaultTitle =
+            typeof resultProjection?.title === 'string' && resultProjection.title.trim()
+              ? resultProjection.title.trim()
+              : typeof resultProjection?.tl_dr === 'string' && resultProjection.tl_dr.trim()
+                ? resultProjection.tl_dr.trim()
+                : doc.subject;
+          try {
+            reportPromotionRequest = buildReportPromotionRequest(body.report_candidate, {
+              dispatchId: doc.dispatch_phid,
+              artifactPath: normalizedResult.artifact_path,
+              agentId: doc.to_agent,
+              defaultTitle,
+              occurredAt: doc.not_before_at,
+            });
+          } catch (err) {
+            const code = err instanceof Error && /^REPORT_CANDIDATE_[A-Z0-9_]+$/.test(err.message)
+              ? err.message
+              : 'REPORT_CANDIDATE_INVALID';
+            return res.status(400).json({ ok: false, error: code });
+          }
+        }
 
         // Harness-resilience (Spec 2026-05-29): failed dispatches do NOT
         // need promotion metadata — promotion only applies to successful
@@ -5323,9 +5403,11 @@ export class AgentManagerDb {
         // done) so the hollow-done surfaces instead of looking complete.
         if (success) {
           const claimArtifactPath =
-            typeof body.artifact_path === 'string' && body.artifact_path.trim()
-              ? body.artifact_path.trim()
-              : null;
+            reportPromotionRequest
+              ? normalizedResult.artifact_path
+              : typeof body.artifact_path === 'string' && body.artifact_path.trim()
+                ? body.artifact_path.trim()
+                : null;
           const verify = verifyDoneClaims(
             {
               artifact_path: claimArtifactPath,
@@ -5416,10 +5498,7 @@ export class AgentManagerDb {
         try {
           terminalDoc = await this.dispatchScheduler.handleAgentDone({
             query_id: doc.query_id,
-            result:
-              body.result && typeof body.result === 'object'
-                ? (body.result as Record<string, unknown>)
-                : null,
+            result: normalizedResult.result,
             success,
             failure_kind: failureKind,
             error: errorDetail,
@@ -5451,21 +5530,15 @@ export class AgentManagerDb {
           });
         }
 
+        let reportCandidateReceipt: ReportCandidateReceipt | null = null;
+
         // Fresh artifact delivery: /agent-done is the first reliable event that
         // an output exists. Register the claimed path immediately so Desk /
         // Recent Output can surface stable artifact metadata and explicit
         // missing-body state without waiting for filesystem reconciliation.
         if (success) {
-          const resultProjection: Record<string, unknown> | null =
-            body.result && typeof body.result === 'object'
-              ? (body.result as Record<string, unknown>)
-              : null;
-          const artifactPath =
-            typeof resultProjection?.artifact_path === 'string' && resultProjection.artifact_path.trim()
-              ? resultProjection.artifact_path.trim()
-              : typeof body.artifact_path === 'string' && body.artifact_path.trim()
-                ? body.artifact_path.trim()
-                : null;
+          const resultProjection = normalizedResult.result;
+          const artifactPath = normalizedResult.artifact_path;
           if (artifactPath) {
             try {
               await migrateOutputsTables(this.db.adapter);
@@ -5524,6 +5597,20 @@ export class AgentManagerDb {
           }
         }
 
+        // The dispatch completion remains authoritative even when the
+        // filesystem handoff projection cannot be written.
+        if (reportPromotionRequest) {
+          reportCandidateReceipt = recordReportPromotionRequest(
+            reportPromotionRequest,
+            process.env.REPORT_PROMOTION_REQUEST_DIR,
+          );
+          if (reportCandidateReceipt.status === 'write_failed' || reportCandidateReceipt.status === 'conflict') {
+            this.managerLog(
+              `[agent-done] report candidate ${reportCandidateReceipt.status} for ${doc.dispatch_phid}`,
+            );
+          }
+        }
+
         // Read-model back-write (2026-06-13): the scheduler closes
         // dispatch_scheduler_queue above, but historically nothing
         // back-wrote the corresponding queries row. Result: /query/<id>
@@ -5538,10 +5625,7 @@ export class AgentManagerDb {
         // dispatch closeout that the scheduler already committed.
         // See: cane/output/2026-06-13-query-row-not-resolved-after-dispatch-done.md
         try {
-          const resultProjection: Record<string, unknown> | null =
-            body.result && typeof body.result === 'object'
-              ? (body.result as Record<string, unknown>)
-              : null;
+          const resultProjection = normalizedResult.result;
           // DispatchDoc doesn't carry team_id, so look it up from the
           // queries table directly. If no matching queries row exists
           // (e.g. dispatch issued via a path that didn't pre-create the
@@ -5591,6 +5675,7 @@ export class AgentManagerDb {
             dispatch_id: doc.dispatch_phid,
             query_id: doc.query_id,
             promotion: promotionCloseoutReport,
+            ...(reportPromotionRequest ? { report_candidate: reportCandidateReceipt } : {}),
           },
         });
       } catch (err) {
