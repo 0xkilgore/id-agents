@@ -888,9 +888,6 @@ export class SchedulerHandle {
       doc = await this.reactor.getByAgentQueryId(args.agent_query_id);
     }
     if (!doc) return null;
-    if (doc.status === "done" || doc.status === "failed" || doc.status === "cancelled") {
-      return doc; // already terminal, no-op
-    }
     if (doc.status !== "in_flight") {
       // The doc is queued/bounced — agent-done arriving for a non-in-flight
       // doc is anomalous but we accept it: mark done.
@@ -915,10 +912,15 @@ export class SchedulerHandle {
       success: args.success !== false,
     });
     if (args.success === false) {
+      const failureKind = args.failure_kind ?? "agent_error";
+      const failureDetail = args.error ?? "agent reported failure";
+      if (this.isTerminal(doc)) {
+        return this.reconcileTerminalFailure(doc, failureKind, failureDetail);
+      }
       // markFailed already accepts queued rows; this branch is unchanged.
       const r = await this.client.markFailed(doc.dispatch_phid, {
-        failure_kind: args.failure_kind ?? "agent_error",
-        detail: args.error ?? "agent reported failure",
+        failure_kind: failureKind,
+        detail: failureDetail,
       });
       return this.requireAgentDoneMutation(r, 'markFailed');
     }
@@ -955,6 +957,11 @@ export class SchedulerHandle {
         message: detail,
         ...(fallback ? { fallback_provider: fallback.provider, fallback_runtime: fallback.runtime } : {}),
       });
+      if (this.isTerminal(doc)) {
+        throw this.agentDoneConflict(
+          `provider-limit bounce conflicts with terminal ${doc.status}`,
+        );
+      }
       const bounced = await this.client.markBounced(doc.dispatch_phid, {
         kind: "provider_limit",
         message: detail,
@@ -975,6 +982,13 @@ export class SchedulerHandle {
           ...decision.log_payload,
         });
         if (decision.override) {
+          if (this.isTerminal(doc)) {
+            return this.reconcileTerminalFailure(
+              doc,
+              decision.failure_kind,
+              decision.detail,
+            );
+          }
           const r = await this.client.markFailed(doc.dispatch_phid, {
             failure_kind: decision.failure_kind,
             detail: decision.detail,
@@ -982,6 +996,13 @@ export class SchedulerHandle {
           return this.requireAgentDoneMutation(r, 'strictModeMarkFailed');
         }
       }
+    }
+    if (this.isTerminal(doc)) {
+      return this.reconcileTerminalSuccess(
+        doc,
+        args.result ?? null,
+        args.report_candidate_request_json ?? null,
+      );
     }
     // Queued-dispatch closeout (Spec 2026-06-01): an out-of-band success
     // /agent-done can arrive for a doc the scheduler never claimed. Use
@@ -1013,6 +1034,47 @@ export class SchedulerHandle {
     const error = new Error(`${operation}: ${result.detail}`) as Error & { code: string };
     error.code = result.reason === 'conflict' ? 'REACTOR_CONFLICT' : 'REACTOR_ERROR';
     throw error;
+  }
+
+  private isTerminal(doc: DispatchDoc): boolean {
+    return doc.status === "done" || doc.status === "failed" || doc.status === "cancelled";
+  }
+
+  private reconcileTerminalSuccess(
+    doc: DispatchDoc,
+    result: Record<string, unknown> | null,
+    reportCandidateRequestJson: string | null,
+  ): DispatchDoc {
+    const resultJson = result ? JSON.stringify(result) : null;
+    if (
+      doc.status === "done"
+      && (doc.result_json ?? null) === resultJson
+      && (doc.report_candidate_request_json ?? null) === reportCandidateRequestJson
+    ) {
+      return doc;
+    }
+    throw this.agentDoneConflict(`success closeout conflicts with terminal ${doc.status}`);
+  }
+
+  private reconcileTerminalFailure(
+    doc: DispatchDoc,
+    failureKind: FailureKind,
+    failureDetail: string,
+  ): DispatchDoc {
+    if (
+      doc.status === "failed"
+      && doc.failure_kind === failureKind
+      && doc.failure_detail === failureDetail
+    ) {
+      return doc;
+    }
+    throw this.agentDoneConflict(`failure closeout conflicts with terminal ${doc.status}`);
+  }
+
+  private agentDoneConflict(detail: string): Error & { code: string } {
+    const error = new Error(detail) as Error & { code: string };
+    error.code = "REACTOR_CONFLICT";
+    return error;
   }
 
   private resolveFallbackLaneForProviderLimit(doc: DispatchDoc): { provider: Provider; runtime: Runtime } | null {

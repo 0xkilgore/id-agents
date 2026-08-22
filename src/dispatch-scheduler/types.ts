@@ -245,6 +245,10 @@ export interface DispatchDoc {
   usage_policy_snapshot: UsagePolicySnapshot | null;
   failure_kind: FailureKind | null;
   failure_detail: string | null;
+  /** Raw canonical completion payload used to reconcile exact /agent-done retries. */
+  result_json?: string | null;
+  /** Durable report handoff tuple used to reconcile exact /agent-done retries. */
+  report_candidate_request_json?: string | null;
   // Spec 054 v2 ─ clarification fields. All additive; absent on legacy
   // rows. clarification_id is the currently-active blocker's id (null
   // when no clarification is open). active_clarification carries the

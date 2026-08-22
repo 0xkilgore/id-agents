@@ -29,13 +29,15 @@ describe('report candidate PostgreSQL contract', () => {
     const adapter = new RecordingPostgresAdapter();
     await migratePostgres(adapter);
     const migrationSql = adapter.statements.join('\n');
+    expect(migrationSql).toContain('CREATE TABLE IF NOT EXISTS dispatch_scheduler_queue');
+    expect(migrationSql).toContain('CREATE TABLE IF NOT EXISTS dispatch_graph_node');
     expect(migrationSql).toContain('ADD COLUMN IF NOT EXISTS report_candidate_request_json text');
     expect(migrationSql).toContain('ADD COLUMN IF NOT EXISTS report_candidate_export_status text');
     expect(migrationSql).toContain('ADD COLUMN IF NOT EXISTS report_candidate_export_attempted_at text');
     expect(migrationSql).toContain('ADD COLUMN IF NOT EXISTS report_candidate_export_error text');
   });
 
-  it('runs legacy and candidate terminal closeouts plus the outbox through a postgres-dialect adapter', async () => {
+  it('keeps generated terminal SQL free of PostgreSQL-untyped null predicates', async () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'report-publishing-postgres-parity-')));
     const sqlite = new SqliteAdapter(join(root, 'parity.db'));
     try {
@@ -43,7 +45,10 @@ describe('report candidate PostgreSQL contract', () => {
       await sqlite.query(`INSERT INTO teams (id, name) VALUES ('team-pg-parity', 'pg parity')`);
       const postgresAdapter: DbAdapter = {
         dialect: 'postgres',
-        query: (sql, params) => sqlite.query(sql, params),
+        query: (sql, params) => {
+          expect(sql).not.toMatch(/CASE\s+WHEN\s+\?\s+IS\s+NULL/i);
+          return sqlite.query(sql, params);
+        },
         close: async () => {},
       };
       const reactor = new SqliteDispatchReactor({

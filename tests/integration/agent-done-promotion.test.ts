@@ -774,7 +774,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
     ]);
   });
 
-  it("idempotent: a second /agent-done is a terminal no-op (no 500, state stays done)", async () => {
+  it("idempotent: an exact /agent-done retry succeeds and a changed retry conflicts", async () => {
     const enq = await enqueue({});
 
     const first = await fetch(`${baseUrl}/agent-done`, {
@@ -794,14 +794,25 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
       body: JSON.stringify({
         dispatch_id: enq.dispatch_phid,
         success: true,
-        result: { artifact_path: "/tmp/second.md" },
+        result: { artifact_path: "/tmp/first.md" },
       }),
     });
     expect(second.status).toBe(200);
     const body = await second.json();
     expect(body.state).toBe("done");
 
-    // First result wins (terminal no-op semantics).
+    const changed = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        result: { artifact_path: "/tmp/second.md" },
+      }),
+    });
+    expect(changed.status).toBe(409);
+
+    // First result wins.
     const reactor = (manager as any).dispatchScheduler.reactor;
     const result = await reactor.getResult(enq.dispatch_phid);
     expect(result).toEqual({ artifact_path: "/tmp/first.md" });

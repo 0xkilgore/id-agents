@@ -5543,10 +5543,13 @@ export class AgentManagerDb {
           return undefined;
         })();
 
-        // Mark the dispatch done.
-        let terminalDoc: typeof doc | null = null;
+        // Commit or reconcile the exact terminal closeout before any
+        // success/failure projections. The returned status is authoritative:
+        // strict-mode classification may turn a syntactic success into a
+        // durable failure or bounce.
+        let terminal: typeof doc | null = null;
         try {
-          terminalDoc = await this.dispatchScheduler.handleAgentDone({
+          terminal = await this.dispatchScheduler.handleAgentDone({
             query_id: doc.query_id,
             result: normalizedResult.result,
             success,
@@ -5556,30 +5559,27 @@ export class AgentManagerDb {
               ? JSON.stringify(reportPromotionRequest)
               : null,
           });
-          if (
-            (!success && terminalDoc?.status !== 'failed')
-            || (reportPromotionRequest && terminalDoc?.status !== 'done')
-          ) {
+          if (!terminal || terminal.status === 'cancelled') {
             const error = new Error(
-              `agent-done terminal conflict: winner is ${terminalDoc?.status ?? 'missing'}`,
+              `agent-done terminal conflict: winner is ${terminal?.status ?? 'missing'}`,
             ) as Error & { code: string };
             error.code = 'REACTOR_CONFLICT';
             throw error;
           }
-          if (this.db.events && terminalDoc) {
-            const eventTeamId = await this.db.queries.findTeam(terminalDoc.query_id)
+          if (this.db.events && terminal) {
+            const eventTeamId = await this.db.queries.findTeam(terminal.query_id)
               ?? await this.db.teams.getOrCreateTeamId('default');
             await emitDispatchStatus(this.db.events, {
               teamId: eventTeamId,
-              dispatchId: terminalDoc.dispatch_phid,
-              queryId: terminalDoc.query_id,
-              toAgent: terminalDoc.to_agent,
-              fromActor: terminalDoc.from_actor,
-              subject: terminalDoc.subject,
-              status: terminalDoc.status,
-              failureKind: terminalDoc.failure_kind,
-              failureDetail: terminalDoc.failure_detail,
-              artifactPath: terminalDoc.artifact_path,
+              dispatchId: terminal.dispatch_phid,
+              queryId: terminal.query_id,
+              toAgent: terminal.to_agent,
+              fromActor: terminal.from_actor,
+              subject: terminal.subject,
+              status: terminal.status,
+              failureKind: terminal.failure_kind,
+              failureDetail: terminal.failure_detail,
+              artifactPath: terminal.artifact_path,
               occurredAt: Date.now(),
             });
           }
@@ -5594,13 +5594,22 @@ export class AgentManagerDb {
           });
         }
 
+        if (terminal.status === 'bounced') {
+          return res.status(202).json({
+            ok: true,
+            dispatch_id: doc.dispatch_phid,
+            state: 'bounced',
+            mode,
+          });
+        }
+        const closeoutSuccess = terminal.status === 'done';
         let reportCandidateReceipt: ReportCandidateReceipt | null = null;
 
         // Fresh artifact delivery: /agent-done is the first reliable event that
         // an output exists. Register the claimed path immediately so Desk /
         // Recent Output can surface stable artifact metadata and explicit
         // missing-body state without waiting for filesystem reconciliation.
-        if (success) {
+        if (closeoutSuccess) {
           const resultProjection = normalizedResult.result;
           const artifactPath = normalizedResult.artifact_path;
           if (artifactPath) {
@@ -5710,7 +5719,7 @@ export class AgentManagerDb {
           // becomes a no-op — correct best-effort behavior.
           const backWriteTeamId = await this.db.queries.findTeam(doc.query_id);
           if (backWriteTeamId) {
-            if (success) {
+            if (closeoutSuccess) {
               await this.db.queries.complete(
                 backWriteTeamId,
                 doc.query_id,
@@ -5735,13 +5744,13 @@ export class AgentManagerDb {
         // N1.3: best-effort graph re-evaluation after dispatch state change.
         this.evaluateGraphsForDispatchBestEffort(
           doc.dispatch_phid,
-          success ? 'dispatch_done' : 'dispatch_failed',
+          closeoutSuccess ? 'dispatch_done' : 'dispatch_failed',
         );
 
         return res.json({
           ok: true,
           dispatch_id: doc.dispatch_phid,
-          state: success ? 'done' : 'failed',
+          state: closeoutSuccess ? 'done' : 'failed',
           mode,
           promotion_warning: ('warning' in validation ? validation.warning : null) ?? null,
           promotion: {

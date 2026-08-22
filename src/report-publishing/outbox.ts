@@ -33,7 +33,7 @@ export async function exportReportCandidateOutboxEntry(
     request = parseReportPromotionRequest(JSON.parse(row.report_candidate_request_json));
   } catch {
     const receipt = corruptedOutboxReceipt(dispatchId);
-    await markExportResult(adapter, dispatchId, receipt, now);
+    await markCorruptOutboxQuarantined(adapter, dispatchId, receipt.error, now);
     return receipt;
   }
 
@@ -41,6 +41,22 @@ export async function exportReportCandidateOutboxEntry(
   const receipt = publicReceipt(result);
   await markExportResult(adapter, dispatchId, receipt, now);
   return receipt;
+}
+
+async function markCorruptOutboxQuarantined(
+  adapter: DbAdapter,
+  dispatchId: string,
+  error: string | null,
+  now: string,
+): Promise<void> {
+  await adapter.query(
+    `UPDATE dispatch_scheduler_queue
+        SET report_candidate_export_status = 'quarantined',
+            report_candidate_export_attempted_at = ?,
+            report_candidate_export_error = ?
+      WHERE dispatch_phid = ? AND report_candidate_request_json IS NOT NULL`,
+    [now, error, dispatchId],
+  );
 }
 
 export async function flushPendingReportCandidateOutbox(

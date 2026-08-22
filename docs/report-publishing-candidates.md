@@ -17,9 +17,11 @@ erase the nomination.
 
 Terminal writes are database compare-and-set operations on both SQLite and
 PostgreSQL. The first success/failure/cancellation wins; an exact simultaneous
-retry recovers the winner, while a conflicting closeout cannot overwrite its
-result or candidate. Malformed durable outbox rows are quarantined individually
-so later valid requests continue exporting.
+or later retry recovers the winner, while a conflicting closeout is rejected
+before artifact, inbox, query, or candidate projections and cannot overwrite
+the stored result or candidate. Classifier bounces return a bounced receipt and
+do not run success projections. Malformed durable outbox rows are quarantined
+individually so later valid requests continue exporting.
 
 Set `REPORT_PROMOTION_ALLOWED_ROOT` to the absolute canonical output root.
 Candidates must be canonical, single-link, nonempty valid UTF-8 Markdown at

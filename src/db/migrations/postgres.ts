@@ -786,6 +786,139 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   await adapter.query(`ALTER TABLE queries ADD COLUMN IF NOT EXISTS manager_dispatch_id TEXT`);
   await adapter.query(`ALTER TABLE queries ADD COLUMN IF NOT EXISTS manager_query_id TEXT`);
 
+  // PostgreSQL is a supported scheduler backend, so a fresh database must get
+  // the same canonical queue that SQLite creates. The following ALTER block
+  // remains for safe upgrades from older partial schemas.
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS dispatch_scheduler_queue (
+      dispatch_phid text PRIMARY KEY,
+      team_id text NOT NULL,
+      query_id text NOT NULL,
+      to_agent text NOT NULL,
+      from_actor text NOT NULL,
+      channel text NOT NULL,
+      subject text NOT NULL,
+      body_markdown text NOT NULL,
+      provider text NOT NULL,
+      runtime text NOT NULL,
+      logical_agent_json text,
+      priority integer NOT NULL DEFAULT 5,
+      status text NOT NULL,
+      not_before_at text NOT NULL,
+      attempt_count integer NOT NULL DEFAULT 0,
+      bounce_count integer NOT NULL DEFAULT 0,
+      last_bounce_json text,
+      bounce_history_json text NOT NULL DEFAULT '[]',
+      started_at text,
+      completed_at text,
+      updated_at text NOT NULL,
+      agent_query_id text,
+      usage_policy_snapshot_json text,
+      failure_kind text,
+      failure_detail text,
+      target_url text,
+      result_json text,
+      clarification_id text,
+      active_clarification_json text,
+      clarification_history_json text NOT NULL DEFAULT '[]',
+      resume_delivery_status text NOT NULL DEFAULT 'none',
+      promote integer NOT NULL DEFAULT 1,
+      promotion_strategy text NOT NULL DEFAULT 'auto',
+      promotion_required_reason text,
+      promotion_result_json text,
+      promotion_input_json text,
+      artifact_path text,
+      report_candidate_request_json text,
+      report_candidate_export_status text,
+      report_candidate_export_attempted_at text,
+      report_candidate_export_error text,
+      recovery_status text DEFAULT 'none',
+      recovery_attempts integer NOT NULL DEFAULT 0,
+      recovery_reason text,
+      side_effect text NOT NULL DEFAULT 'none',
+      allow_auto_retry integer NOT NULL DEFAULT 0,
+      supersede_link text,
+      dedup_key text,
+      reliability_classification text,
+      reliability_classification_reason text
+    )
+  `);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS dispatch_scheduler_eligible_idx
+    ON dispatch_scheduler_queue(status, provider, runtime, not_before_at, priority)`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS dispatch_scheduler_queue_read_idx
+    ON dispatch_scheduler_queue(team_id, status, provider, runtime, priority DESC, not_before_at, dispatch_phid)`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS dispatch_scheduler_in_flight_read_idx
+    ON dispatch_scheduler_queue(team_id, status, provider, runtime, started_at, dispatch_phid)`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS dispatch_scheduler_bounced_read_idx
+    ON dispatch_scheduler_queue(team_id, status, provider, runtime, not_before_at, dispatch_phid)`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_terminal_idx
+    ON dispatch_scheduler_queue(team_id, status, completed_at DESC, dispatch_phid)`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS dispatch_scheduler_query_id_idx
+    ON dispatch_scheduler_queue(query_id)`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS dispatch_scheduler_agent_query_id_idx
+    ON dispatch_scheduler_queue(agent_query_id)`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS dispatch_scheduler_team_agent_query_idx
+    ON dispatch_scheduler_queue(team_id, agent_query_id) WHERE agent_query_id IS NOT NULL`);
+  await adapter.query(`CREATE UNIQUE INDEX IF NOT EXISTS dispatch_scheduler_team_query_idx
+    ON dispatch_scheduler_queue(team_id, query_id)`);
+
+  // claimEligible performs a graph-readiness lookup for every queued row, so
+  // the graph substrate is an unconditional scheduler dependency even when a
+  // dispatch is not part of a graph.
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS dispatch_graph (
+      graph_id text PRIMARY KEY,
+      title text NOT NULL,
+      status text NOT NULL DEFAULT 'draft',
+      version integer NOT NULL DEFAULT 1,
+      created_by_actor_json text NOT NULL DEFAULT '{}',
+      created_at text NOT NULL,
+      plan_idempotency_key text,
+      source_json text
+    )
+  `);
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS dispatch_graph_node (
+      node_id text PRIMARY KEY,
+      graph_id text NOT NULL REFERENCES dispatch_graph(graph_id),
+      title text NOT NULL,
+      kind text NOT NULL DEFAULT 'dispatch',
+      dispatch_id text,
+      task_phid text,
+      state text NOT NULL DEFAULT 'pending_dependencies',
+      blocker_summary_json text,
+      client_node_id text
+    )
+  `);
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS dispatch_graph_edge (
+      edge_id text PRIMARY KEY,
+      graph_id text NOT NULL REFERENCES dispatch_graph(graph_id),
+      from_node_id text NOT NULL REFERENCES dispatch_graph_node(node_id),
+      to_node_id text NOT NULL REFERENCES dispatch_graph_node(node_id),
+      relation text NOT NULL,
+      predicate_json text NOT NULL DEFAULT '{}'
+    )
+  `);
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS dispatch_graph_decision (
+      decision_id text PRIMARY KEY,
+      graph_id text NOT NULL REFERENCES dispatch_graph(graph_id),
+      node_id text NOT NULL REFERENCES dispatch_graph_node(node_id),
+      idempotency_key text NOT NULL UNIQUE,
+      result text NOT NULL,
+      reason text NOT NULL,
+      input_revision text NOT NULL,
+      created_at text NOT NULL
+    )
+  `);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS idx_graph_node_graph ON dispatch_graph_node(graph_id)`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS idx_graph_node_dispatch ON dispatch_graph_node(dispatch_id)`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS idx_graph_edge_graph ON dispatch_graph_edge(graph_id)`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS idx_graph_decision_node ON dispatch_graph_decision(node_id)`);
+  await adapter.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_plan_idempotency ON dispatch_graph(plan_idempotency_key)`);
+  await adapter.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_node_client ON dispatch_graph_node(graph_id, client_node_id)`);
+
   // Spec 056 ─ first-class artifact_path on dispatch_scheduler_queue,
   // sourced from /agent-done.result.artifact_path. Additive, idempotent.
   // Guarded behind table existence so installs without the scheduler
@@ -798,6 +931,16 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
         WHERE table_schema = 'public' AND table_name = 'dispatch_scheduler_queue'
       ) THEN
         ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS artifact_path text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS logical_agent_json text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS clarification_id text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS active_clarification_json text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS clarification_history_json text NOT NULL DEFAULT '[]';
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS resume_delivery_status text NOT NULL DEFAULT 'none';
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS promote integer NOT NULL DEFAULT 1;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS promotion_strategy text NOT NULL DEFAULT 'auto';
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS promotion_required_reason text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS promotion_result_json text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS promotion_input_json text;
         -- Report candidate outbox. These columns mirror the SQLite schema so
         -- every terminal closeout uses the same adapter-neutral CAS update,
         -- including legacy closeouts that store NULL here.
@@ -811,6 +954,16 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
         ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS recovery_reason text;
         ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS side_effect text NOT NULL DEFAULT 'none';
         ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS allow_auto_retry integer NOT NULL DEFAULT 0;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS supersede_link text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS dedup_key text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS reliability_classification text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS reliability_classification_reason text;
+        CREATE UNIQUE INDEX IF NOT EXISTS dispatch_scheduler_dedup_active_idx
+          ON dispatch_scheduler_queue(team_id, dedup_key)
+          WHERE dedup_key IS NOT NULL
+            AND status IN ('queued', 'in_flight', 'bounced', 'needs_clarification', 'resume_delivery_failed');
+        CREATE INDEX IF NOT EXISTS dispatch_scheduler_reliability_idx
+          ON dispatch_scheduler_queue(team_id, status, reliability_classification);
         CREATE INDEX IF NOT EXISTS dispatch_scheduler_artifact_path_idx
           ON dispatch_scheduler_queue(team_id, artifact_path)
           WHERE artifact_path IS NOT NULL;

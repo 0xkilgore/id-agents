@@ -103,6 +103,7 @@ interface Row {
   promotion_strategy: DispatchDoc["promotion_strategy"];
   promotion_required_reason: string | null;
   promotion_result_json: string | null;
+  report_candidate_request_json: string | null;
   // Spec 054 v2 Part 2 — enqueue-side promotion input JSON.
   promotion_input_json: string | null;
 }
@@ -493,11 +494,12 @@ export class SqliteDispatchReactor {
         ? result.artifact_path
         : null;
     const resultJson = result ? JSON.stringify(result) : null;
+    const exportStatus = reportCandidateRequestJson === null ? null : 'pending';
     const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?,
            report_candidate_request_json = ?,
-           report_candidate_export_status = CASE WHEN ? IS NULL THEN NULL ELSE 'pending' END,
+           report_candidate_export_status = ?,
            report_candidate_export_attempted_at = NULL,
            report_candidate_export_error = NULL
        WHERE dispatch_phid = ? AND status = 'in_flight'`,
@@ -507,7 +509,7 @@ export class SqliteDispatchReactor {
         resultJson,
         artifactPath,
         reportCandidateRequestJson,
-        reportCandidateRequestJson,
+        exportStatus,
         phid,
       ],
     );
@@ -553,11 +555,12 @@ export class SqliteDispatchReactor {
         ? result.artifact_path
         : null;
     const resultJson = result ? JSON.stringify(result) : null;
+    const exportStatus = reportCandidateRequestJson === null ? null : 'pending';
     const updated = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?,
            report_candidate_request_json = ?,
-           report_candidate_export_status = CASE WHEN ? IS NULL THEN NULL ELSE 'pending' END,
+           report_candidate_export_status = ?,
            report_candidate_export_attempted_at = NULL,
            report_candidate_export_error = NULL
        WHERE dispatch_phid = ? AND status = 'queued'`,
@@ -567,7 +570,7 @@ export class SqliteDispatchReactor {
         resultJson,
         artifactPath,
         reportCandidateRequestJson,
-        reportCandidateRequestJson,
+        exportStatus,
         phid,
       ],
     );
@@ -1635,6 +1638,8 @@ function rowToDoc(row: Row): DispatchDoc {
     usage_policy_snapshot: parsePolicy(row.usage_policy_snapshot_json),
     failure_kind: row.failure_kind,
     failure_detail: row.failure_detail,
+    result_json: row.result_json ?? null,
+    report_candidate_request_json: row.report_candidate_request_json ?? null,
     // Spec 054 v2 fields - tolerate legacy rows with null columns.
     clarification_id: row.clarification_id ?? null,
     active_clarification: parseClarificationBlocker(row.active_clarification_json),

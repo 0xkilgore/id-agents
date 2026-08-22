@@ -582,7 +582,7 @@ describe("handleAgentDone — structured failure_kind", () => {
     fetchSpy.mockRestore();
   });
 
-  it("repeated /agent-done on already-failed doc is a no-op", async () => {
+  it("accepts only the exact repeated /agent-done failure tuple", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
     fetchSpy.mockResolvedValue(
       new Response(JSON.stringify({ query_id: "agent-q-noop" }), { status: 200 }) as unknown as Response,
@@ -605,15 +605,18 @@ describe("handleAgentDone — structured failure_kind", () => {
       failure_kind: "model_api_error_exhausted",
       error: "first",
     });
-    const second = await handle.handleAgentDone({
+    const exact = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: false,
+      failure_kind: "model_api_error_exhausted",
+      error: "first",
+    });
+    expect(exact?.status).toBe("failed");
+    await expect(handle.handleAgentDone({
       query_id: enq.query_id,
       success: true,
       result: { reply: "ignored" },
-    });
-    // Second call must not transition the terminal doc — first failure
-    // remains the persisted state.
-    expect(second?.status).toBe("failed");
-    expect(second?.failure_kind).toBe("model_api_error_exhausted");
+    })).rejects.toThrow(/conflicts with terminal failed/i);
     fetchSpy.mockRestore();
   });
 });
@@ -709,7 +712,7 @@ describe("handleAgentDone — queued-dispatch closeout (Spec 2026-06-01)", () =>
     ).rejects.toThrow(/needs_clarification|requires in_flight/i);
   });
 
-  it("queued + success closeout twice is idempotent (terminal no-op)", async () => {
+  it("queued + success accepts an exact retry and rejects a changed retry", async () => {
     const handle = new SchedulerHandle({
       adapter,
       teamId: "team",
@@ -728,14 +731,17 @@ describe("handleAgentDone — queued-dispatch closeout (Spec 2026-06-01)", () =>
     });
     expect(first?.status).toBe("done");
 
-    // Second call must be a no-op; the persisted result of the first
-    // call wins (terminal docs are not re-mutated).
-    const second = await handle.handleAgentDone({
+    const exact = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: true,
+      result: { artifact_path: "/tmp/first.md" },
+    });
+    expect(exact?.status).toBe("done");
+    await expect(handle.handleAgentDone({
       query_id: enq.query_id,
       success: true,
       result: { artifact_path: "/tmp/second.md" },
-    });
-    expect(second?.status).toBe("done");
+    })).rejects.toThrow(/conflicts with terminal done/i);
     const r = await handle.reactor.getResult(enq.dispatch_phid);
     expect(r).toEqual({ artifact_path: "/tmp/first.md" });
   });
